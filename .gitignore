@@ -1,0 +1,34 @@
+# IDE 与编辑器
+.idea/
+.vscode/
+
+# 构建产物
+target/
+dist/
+build/
+.next/
+
+# 依赖
+node_modules/
+
+# 缓存
+.cache/
+coverage/
+
+# 其他大型/无用目录
+logs/
+*.log
+.worktrees/
+worktrees/
+
+# SQLite 运行时数据文件
+config.db
+config.db-shm
+config.db-wal
+
+*.iml
+
+.classpath
+.project
+.metadata
+.settings

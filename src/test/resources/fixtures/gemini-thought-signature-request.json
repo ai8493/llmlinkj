@@ -1,0 +1,40 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "Hello"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "name": "run_shell_command",
+            "args": {
+              "command": "java -version"
+            }
+          },
+          "thoughtSignature": "skip_thought_signature_validator"
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "id": "call_1",
+            "name": "run_shell_command",
+            "response": {
+              "output": "java version 25.0.1"
+            }
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ]
+}

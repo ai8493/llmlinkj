@@ -1,0 +1,33 @@
+{
+  "id": "ff4ee3a4-dbb5-47da-a654-c626c7031b55",
+  "object": "chat.completion",
+  "created": 1778736425,
+  "model": "deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "index": 0,
+            "id": "call_00_8C8XdaB9FBmXLXAiWUVj3964",
+            "type": "function",
+            "function": {
+              "name": "run_shell_command",
+              "arguments": "{\"command\": \"java -version\", \"description\": \"Check Java version\", \"dir_path\": \"D:\\\\AI\\\\gemini-work\"}"
+            }
+          }
+        ],
+        "reasoning_content": "The user wants me to execute `java -version` command. Let me do that."
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10773,
+    "completion_tokens": 107,
+    "total_tokens": 10880
+  }
+}

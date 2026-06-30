@@ -1,0 +1,13 @@
+model_provider = "llm-proxy"
+model = "[[${defaultModel}]]"
+model_reasoning_effort = "xhigh"
+disable_response_storage = true
+
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
+[model_providers.llm-proxy]
+name = "LLM Proxy"
+wire_api = "responses"
+base_url = "[[${proxyBaseUrl}]]/v1"
+requires_openai_auth = true

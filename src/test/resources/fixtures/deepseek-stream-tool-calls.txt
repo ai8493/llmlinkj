@@ -1,0 +1,16 @@
+data: {"id": "1", "object": "chat.completion.chunk", "created": 1, "model": "x", "choices": [{"index": 0, "delta": {"role": "assistant", "content": null, "reasoning_content": ""}, "finish_reason": null}]}
+
+data: {"id": "2", "object": "chat.completion.chunk", "created": 1, "model": "x", "choices": [{"index": 0, "delta": {"content": null, "reasoning_content": "The user wants"}, "finish_reason": null}]}
+
+data: {"id": "3", "object": "chat.completion.chunk", "created": 1, "model": "x", "choices": [{"index": 0, "delta": {"content": null, "reasoning_content": " to run java -version"}, "finish_reason": null}]}
+
+data: {"id": "4", "object": "chat.completion.chunk", "created": 1, "model": "x", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_00_test", "type": "function", "function": {"name": "run_shell_command", "arguments": ""}}]}, "finish_reason": null}]}
+
+data: {"id": "5", "object": "chat.completion.chunk", "created": 1, "model": "x", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"command\": \"java -version\"}"}}]}, "finish_reason": null}]}
+
+data: {"id": "6", "object": "chat.completion.chunk", "created": 1, "model": "x", "choices": [{"index": 0, "delta": {"content": "", "reasoning_content": null}, "finish_reason": "tool_calls"}]}
+
+data: {"id": "7", "object": "chat.completion.chunk", "created": 1, "model": "x", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+data: [DONE]
+

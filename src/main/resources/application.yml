@@ -1,0 +1,77 @@
+server:
+  port: 8493
+  shutdown: graceful
+  netty:
+    connection-timeout: 120s
+    idle-timeout: 120s
+
+spring:
+  config:
+    import: classpath:application-security.yml
+  application:
+    name: llmlinkj
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: false
+  codec:
+    max-in-memory-size: 10MB
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  datasource:
+    url: "jdbc:sqlite:${SQLITE_PATH:./config.db}?journal_mode=WAL&busy_timeout=5000"
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 4
+      minimum-idle: 1
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  thymeleaf:
+    cache: false
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      deepseek-api:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 5
+      gemini-api:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 5
+  retry:
+    instances:
+      deepseek-api:
+        max-attempts: 2
+        wait-duration: 2s
+      gemini-api:
+        max-attempts: 2
+        wait-duration: 2s
+  ratelimiter:
+    instances:
+      deepseek-api:
+        limit-for-period: 50
+        limit-refresh-period: 1s
+        timeout-duration: 5s
+      gemini-api:
+        limit-for-period: 50
+        limit-refresh-period: 1s
+        timeout-duration: 5s
+  timelimiter:
+    instances:
+      deepseek-api:
+        timeout-duration: 120s
+      gemini-api:
+        timeout-duration: 120s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  metrics:
+    tags:
+      application: ${spring.application.name}

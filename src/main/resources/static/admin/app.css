@@ -1,0 +1,36 @@
+body { background: #f8f9fa; }
+.card { box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+table th { background: #f1f3f5; }
+.form-label { font-weight: 500; }
+.toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
+/* Tom Select 下拉浮层提升 z-index，避免被协议映射弹窗（z-index:1050）遮挡 */
+.ts-dropdown.form-select { z-index: 1100; }
+/* 编辑模式下 backendCfgName 禁用（主键不可改）但视觉跟启用一致，避免默认变灰突兀 */
+.ts-wrapper.disabled .ts-control { background-color: transparent; }
+
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 1050; }
+.modal-overlay.show { display: flex; align-items: flex-start; justify-content: center; padding-top: 60px; }
+.modal-dialog { background: #fff; border-radius: .3rem; width: 100%; max-width: 960px; max-height: calc(100vh - 80px); overflow-y: auto; box-shadow: 0 .5rem 1rem rgba(0,0,0,.15); }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.25rem; border-bottom: 1px solid #dee2e6; }
+.modal-title { margin: 0; font-size: 1.1rem; }
+.modal-close { background: none; border: none; font-size: 1.5rem; line-height: 1; color: #6c757d; cursor: pointer; padding: 0; }
+.modal-close:hover { color: #000; }
+.modal-body { padding: 1.25rem; }
+.modal-footer { padding: 1rem 1.25rem; border-top: 1px solid #dee2e6; display: flex; justify-content: flex-end; gap: .5rem; }
+.advanced-toggle { display: flex; align-items: center; margin: 1.25rem 0; cursor: pointer; user-select: none; border: none; background: none; padding: 0; }
+.advanced-toggle::before, .advanced-toggle::after { content: ''; flex: 1; height: 1px; background: #dee2e6; }
+.advanced-toggle .toggle-pill { margin: 0 .75rem; padding: .2rem .85rem; border: 1px solid #dee2e6; border-radius: 999px; background: #fff; display: inline-flex; align-items: center; gap: .25rem; font-size: .85rem; font-weight: 500; color: #495057; transition: all .15s; }
+.advanced-toggle:hover .toggle-pill { border-color: #adb5bd; color: #212529; }
+.toggle-arrow { transition: transform .2s; }
+.advanced-toggle.expanded .toggle-arrow { transform: rotate(180deg); }
+.advanced-section { display: none; padding-top: 1rem; }
+.advanced-section.show { display: block; }
+
+/* 客户端配置页 CodeMirror 编辑器高度 */
+.CodeMirror {
+    height: 600px;
+    border: 1px solid #ced4da;
+    border-radius: .25rem;
+    font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 13px;
+}

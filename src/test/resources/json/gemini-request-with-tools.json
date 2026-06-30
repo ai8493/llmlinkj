@@ -1,0 +1,28 @@
+{
+  "contents": [
+    {"parts": [{"text": "北京天气怎么样"}], "role": "user"}
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "get_weather",
+          "description": "获取指定城市的天气信息",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {"type": "string", "description": "城市名称"},
+              "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+            },
+            "required": ["city"]
+          }
+        }
+      ]
+    }
+  ],
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "AUTO"
+    }
+  }
+}

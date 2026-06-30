@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>协议映射 - LLM Proxy 管理</title>
+    <link th:href="@{/css/bootstrap.min.css}" rel="stylesheet"/>
+    <link th:href="@{/vendor/tom-select/tom-select.bootstrap5.min.css}" rel="stylesheet"/>
+    <link th:href="@{/admin/app.css}" rel="stylesheet"/>
+    <meta name="_csrf" th:content="${_csrf != null ? _csrf.token : ''}"/>
+    <meta name="_csrf_header" content="X-XSRF-TOKEN"/>
+</head>
+<body>
+<div th:replace="~{admin/layout :: nav('protocols')}"></div>
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h4 class="mb-0">协议路由映射</h4>
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
+        <div class="input-group input-group-sm" style="max-width: 320px;">
+            <span class="input-group-text">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+                </svg>
+            </span>
+            <select id="protocol-search" class="form-select form-select-sm" onchange="onProtocolSearchChange(this.value)">
+                <option value="">全部</option>
+            </select>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="addProtocol()">+ 新增</button>
+    </div>
+
+    <table class="table table-bordered">
+        <thead>
+        <tr>
+            <th>客户端协议</th><th>大模型配置名称</th><th>启用</th><th>操作</th>
+        </tr>
+        </thead>
+        <tbody id="protocol-tbody">
+        </tbody>
+    </table>
+
+    <div class="d-flex justify-content-end align-items-center flex-wrap gap-3">
+        <div id="protocol-page-info" class="text-muted small"></div>
+        <div class="input-group input-group-sm" style="width: auto;">
+            <span class="input-group-text">每页</span>
+            <select id="protocol-page-size" class="form-select form-select-sm" style="width: 80px;" onchange="onProtocolPageSizeChange(this.value)">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+            </select>
+            <span class="input-group-text">条</span>
+        </div>
+        <ul class="pagination pagination-sm mb-0" id="protocol-pagination"></ul>
+    </div>
+</div>
+
+<!-- 删除确认 弹窗 -->
+<div class="modal-overlay" id="protocol-delete-modal">
+    <div class="modal-dialog" style="max-width: 480px;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">删除协议映射</h5>
+                <button type="button" class="modal-close" onclick="closeProtocolDeleteModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div id="protocol-delete-tip" class="text-muted"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeProtocolDeleteModal()">取消</button>
+                <button type="button" class="btn btn-danger" id="protocol-delete-confirm">删除</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 新增/编辑 弹窗 -->
+<div class="modal-overlay" id="protocol-modal">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="protocol-modal-title">新增协议映射</h5>
+                <button type="button" class="modal-close" onclick="closeProtocolModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <form id="protocol-form">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label">客户端协议</label>
+                            <select id="clientProtocol" class="form-select" required></select>
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label">大模型配置名称</label>
+                            <select id="backendCfgName" class="form-select" required>
+                                <option value="">请选择</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">模型映射列表</label>
+                            <table class="table table-bordered table-sm mb-2">
+                                <thead>
+                                <tr><th>请求模型名</th><th>实际模型名</th><th style="width:80px;">操作</th></tr>
+                                </thead>
+                                <tbody id="model-mapping-tbody">
+                                </tbody>
+                            </table>
+                            <div class="row g-2">
+                                <div class="col-md-5">
+                                    <input type="text" id="mm-requestModel" class="form-control form-control-sm" placeholder="请求模型名"/>
+                                </div>
+                                <div class="col-md-5">
+                                    <input type="text" id="mm-actualModel" class="form-control form-control-sm" placeholder="实际模型名"/>
+                                </div>
+                                <div class="col-md-2 d-flex align-items-end">
+                                    <button type="button" class="btn btn-sm btn-outline-primary w-100" onclick="addModelMappingRow()">+ 添加</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeProtocolModal()">取消</button>
+                <button type="submit" form="protocol-form" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- 通用确认弹窗 (替代原生 confirm) -->
+<div class="modal-overlay" id="confirm-modal">
+    <div class="modal-dialog" style="max-width: 480px;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">确认</h5>
+                <button type="button" class="modal-close" onclick="confirmModalCancel()">×</button>
+            </div>
+            <div class="modal-body">
+                <div id="confirm-modal-message" class="text-muted"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="confirmModalCancel()">取消</button>
+                <button type="button" class="btn btn-primary" onclick="confirmModalOk()">确定</button>
+            </div>
+        </div>
+    </div>
+</div>
+<script th:src="@{/vendor/tom-select/tom-select.base.min.js}"></script>
+<script th:src="@{/admin/app.js}"></script>
+</body>
+</html>

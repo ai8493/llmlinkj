@@ -1,0 +1,36 @@
+{
+  "contents": [
+    {"parts": [{"text": "执行 java -version"}], "role": "user"},
+    {
+      "parts": [
+        {"functionCall": {"name": "run_shell_command", "args": {"command": "java -version", "description": "检查 Java 版本"}}}
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {"functionResponse": {"id": "call_001", "name": "run_shell_command", "response": {"output": "java version \"25.0.1\""}}}
+      ],
+      "role": "user"
+    },
+    {"parts": [{"text": "再执行 mvn --version"}], "role": "user"}
+  ],
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "run_shell_command",
+          "description": "执行 shell 命令",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {"type": "string"},
+              "description": {"type": "string"}
+            },
+            "required": ["command"]
+          }
+        }
+      ]
+    }
+  ]
+}

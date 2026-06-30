@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>登录 - LLM Proxy 管理</title>
+    <link th:href="@{/css/bootstrap.min.css}" rel="stylesheet"/>
+    <link th:href="@{/admin/app.css}" rel="stylesheet"/>
+    <meta name="_csrf" th:content="${_csrf != null ? _csrf.token : ''}"/>
+    <meta name="_csrf_header" content="X-XSRF-TOKEN"/>
+</head>
+<body class="bg-light">
+<div class="container">
+    <div class="row justify-content-center mt-5">
+        <div class="col-md-4">
+            <h3 class="text-center mb-4">LLM Proxy 管理后台</h3>
+            <form method="post" action="/admin/login">
+                <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}"/>
+                <div class="mb-3">
+                    <label class="form-label">用户名</label>
+                    <input type="text" name="username" class="form-control" value="admin" required/>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">密码</label>
+                    <input type="password" name="password" class="form-control" required/>
+                </div>
+                <button type="submit" class="btn btn-primary w-100">登录</button>
+            </form>
+        </div>
+    </div>
+</div>
+<script th:src="@{/admin/app.js}"></script>
+<script th:inline="javascript">
+var showError = /*[[${loginError}]]*/ false;
+var showLogout = /*[[${logoutSuccess}]]*/ false;
+</script>
+<script th:if="${loginError}">
+  toast('用户名或密码错误', 'danger');
+</script>
+<script th:if="${logoutSuccess}">
+  toast('已登出', 'success');
+</script>
+</body>
+</html>

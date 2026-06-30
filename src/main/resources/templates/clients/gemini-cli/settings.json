@@ -1,0 +1,17 @@
+{
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    }
+  },
+  "ui": {
+    "errorVerbosity": "full",
+    "footer": {
+      "hideContextPercentage": false
+    },
+    "hideContextSummary": false
+  },
+  "privacy": {
+    "usageStatisticsEnabled": false
+  }
+}

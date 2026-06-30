@@ -1,0 +1,3 @@
+GEMINI_API_KEY=[[${apiKey}]]
+GEMINI_MODEL=[[${defaultModel}]]
+GOOGLE_GEMINI_BASE_URL=[[${proxyBaseUrl}]]

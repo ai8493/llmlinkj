@@ -1,0 +1,8 @@
+{
+  "contents": [
+    {"parts": [{"text": "你好"}], "role": "user"}
+  ],
+  "systemInstruction": {
+    "parts": [{"text": "你是一个有帮助的助手"}]
+  }
+}

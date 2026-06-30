@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- 日志文件路径 -->
+    <property name="LOG_PATH" value="${LOG_PATH:-logs}"/>
+    <property name="LOG_PATTERN" value="%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{traceId}] %-5level %logger{36}:%L - %msg%n"/>
+
+    <!-- 控制台输出 -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+    </appender>
+
+    <!-- 全量日志文件：按天+大小滚动，单文件最大100MB，保留3天 -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/llmlinkj.log</file>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/llmlinkj.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>30MB</maxFileSize>
+            <maxHistory>20</maxHistory>
+            <totalSizeCap>0</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+
+    <!-- 错误日志单独输出：单文件最大100MB，保留3天 -->
+    <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/llmlinkj-error.log</file>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+        </encoder>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/llmlinkj-error.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <maxFileSize>30MB</maxFileSize>
+            <maxHistory>10</maxHistory>
+            <totalSizeCap>0</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+
+    <root level="INFO">
+        <!--<appender-ref ref="CONSOLE"/>-->
+        <appender-ref ref="FILE"/>
+        <appender-ref ref="ERROR_FILE"/>
+    </root>
+
+    <!-- 项目自身 -->
+    <logger name="com.ai8493.llmproxy" level="DEBUG"/>
+
+    <!-- OpenAI 适配器 TRACE 级别，记录完整请求/响应报文 -->
+    <logger name="com.ai8493.llmproxy.adapter.openai" level="TRACE"/>
+
+    <!-- Anthropic 适配器 TRACE 级别，记录完整请求/响应报文 -->
+    <logger name="com.ai8493.llmproxy.adapter.anthropic" level="TRACE"/>
+
+    <!-- SDK 保持 INFO -->
+    <logger name="com.google.genai" level="INFO"/>
+    <logger name="com.openai" level="INFO"/>
+    <logger name="com.anthropic" level="INFO"/>
+
+    <!-- OkHttp 请求/响应正文（DEBUG 级别，脱敏 Authorization） -->
+    <logger name="okhttp3.OpenAiBackend" level="DEBUG"/>
+
+    <!-- Spring Web 路由日志 -->
+    <logger name="org.springframework.web" level="DEBUG"/>
+
+    <!-- Netty 保持 WARN -->
+    <logger name="io.netty" level="WARN"/>
+</configuration>
