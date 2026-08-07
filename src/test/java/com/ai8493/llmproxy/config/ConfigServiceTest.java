@@ -40,7 +40,7 @@ class ConfigServiceTest {
     @Test
     void shouldListAllBackends() {
         backendRepo.save(new BackendConfigEntity(
-            "test", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, "t"));
+            "test", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, null, null, null, null, "t"));
 
         var list = service.listBackends();
         assertThat(list).hasSize(1);
@@ -51,7 +51,7 @@ class ConfigServiceTest {
     void shouldReturnPlainApiKeyWhenListing() {
         backendRepo.save(new BackendConfigEntity(
             "test", "openai", "sk-abcdef1234567890", "u", "m", null,
-            5, 5, 5, 5, 60, "t"));
+            5, 5, 5, 5, 60, null, null, null, null, "t"));
 
         var list = service.listBackends();
         assertThat(list.get(0).apiKey()).isEqualTo("sk-abcdef1234567890");
@@ -61,11 +61,11 @@ class ConfigServiceTest {
     void shouldSaveBackendWithMaskedApiKeyUnchangedWhenBlank() {
         backendRepo.save(new BackendConfigEntity(
             "test", "openai", "sk-secret123", "u", "m", null,
-            5, 5, 5, 5, 60, "t"));
+            5, 5, 5, 5, 60, null, null, null, null, "t"));
 
         service.saveBackend(new BackendConfigEntity(
             "test", "anthropic", "", "u2", "m2", null,
-            5, 5, 5, 5, 60, "t"));
+            5, 5, 5, 5, 60, null, null, null, null, "t"));
 
         var saved = backendRepo.findById("test").orElseThrow();
         assertThat(saved.protocol()).isEqualTo("anthropic");
@@ -75,7 +75,7 @@ class ConfigServiceTest {
     @Test
     void shouldDeleteBackendWhenNoProtocolMappingReference() {
         backendRepo.save(new BackendConfigEntity(
-            "test", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, "t"));
+            "test", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, null, null, null, null, "t"));
 
         service.deleteBackend("test");
         assertThat(backendRepo.findById("test")).isEmpty();
@@ -84,7 +84,7 @@ class ConfigServiceTest {
     @Test
     void shouldRejectDeleteBackendWhenReferencedByProtocolMapping() {
         backendRepo.save(new BackendConfigEntity(
-            "test", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, "t"));
+            "test", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, null, null, null, null, "t"));
         protocolRepo.save(new ProtocolMappingEntity(
             "openai", "test", true, "t", null));
 
@@ -231,7 +231,7 @@ class ConfigServiceTest {
     void shouldReturnDefaultModelWhenEnabledProtocolMappingExists() {
         backendRepo.save(new BackendConfigEntity(
             "deepseek", "responses", "k", "u", "deepseek-v3", null,
-            5, 5, 5, 5, 60, "2026-06-01T00:00:00Z"));
+            5, 5, 5, 5, 60, null, null, null, null, "2026-06-01T00:00:00Z"));
         protocolRepo.save(new ProtocolMappingEntity(
             "responses", "deepseek", true, "2026-06-01T00:00:00Z", null));
 
@@ -243,7 +243,7 @@ class ConfigServiceTest {
     void shouldReturnEmptyWhenNoEnabledProtocolMapping() {
         backendRepo.save(new BackendConfigEntity(
             "deepseek", "responses", "k", "u", "deepseek-v3", null,
-            5, 5, 5, 5, 60, "2026-06-01T00:00:00Z"));
+            5, 5, 5, 5, 60, null, null, null, null, "2026-06-01T00:00:00Z"));
         protocolRepo.save(new ProtocolMappingEntity(
             "responses", "deepseek", false, "2026-06-01T00:00:00Z", null));
 
@@ -267,10 +267,10 @@ class ConfigServiceTest {
         // 分别指向不同 defaultModel 的后端，断言返回 updatedAt 较大那条对应的后端 defaultModel。
         backendRepo.save(new BackendConfigEntity(
             "deepseek", "responses", "k", "u", "deepseek-v3", null,
-            5, 5, 5, 5, 60, "2026-06-01T00:00:00Z"));
+            5, 5, 5, 5, 60, null, null, null, null, "2026-06-01T00:00:00Z"));
         backendRepo.save(new BackendConfigEntity(
             "moonshot", "responses", "k", "u", "moonshot-v1", null,
-            5, 5, 5, 5, 60, "2026-06-01T00:00:00Z"));
+            5, 5, 5, 5, 60, null, null, null, null, "2026-06-01T00:00:00Z"));
         protocolRepo.save(new ProtocolMappingEntity(
             "responses", "deepseek", true, "2026-06-01T00:00:00Z", null));
         protocolRepo.save(new ProtocolMappingEntity(
@@ -284,13 +284,13 @@ class ConfigServiceTest {
     void shouldInvalidateCacheOnSaveBackend() {
         backendRepo.save(new BackendConfigEntity(
             "cache-test", "openai", "k", "https://api.openai.com", "m1", null,
-            5, 5, 5, 5, 60, "t"));
+            5, 5, 5, 5, 60, null, null, null, null, "t"));
         BackendAdapter before = backendFactory.get("cache-test");
 
         // 改 defaultModel 触发 saveBackend
         service.saveBackend(new BackendConfigEntity(
             "cache-test", "openai", "k", "https://api.openai.com", "m2", null,
-            5, 5, 5, 5, 60, "t"));
+            5, 5, 5, 5, 60, null, null, null, null, "t"));
         BackendAdapter after = backendFactory.get("cache-test");
 
         assertThat(after).isNotSameAs(before);
@@ -300,7 +300,7 @@ class ConfigServiceTest {
     void shouldInvalidateCacheOnDeleteBackend() {
         backendRepo.save(new BackendConfigEntity(
             "cache-test-del", "openai", "k", "https://api.openai.com", "m1", null,
-            5, 5, 5, 5, 60, "t"));
+            5, 5, 5, 5, 60, null, null, null, null, "t"));
         backendFactory.get("cache-test-del");
 
         service.deleteBackend("cache-test-del");

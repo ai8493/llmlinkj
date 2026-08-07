@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -82,7 +83,7 @@ class RealMessageTest {
     @DisplayName("Gemini 请求报文: 中文内容无乱码")
     void shouldPreserveChineseContent() throws Exception {
         byte[] raw = readJsonFixture(1);
-        String bodyStr = new String(raw);
+        String bodyStr = new String(raw, StandardCharsets.UTF_8);
 
         // 真实报文中的中文关键词
         assertThat(bodyStr).contains("用java25+swing");

@@ -73,13 +73,65 @@ class CodexToolCompatTest {
         assertThat(result.get(0).function().description()).contains("FREEFORM custom tool");
     }
 
+    // ===== P3-14: custom 工具元数据保留 =====
+
+    @Test
+    void shouldEmbedOriginalDefinitionInCustomProxyDescription() {
+        // P3-14: custom 工具代理的 description 应包含原始工具定义 JSON
+        List<UnifiedTool> result = CodexToolCompat.expandCustom(
+            "my_custom_tool", "A tool that does something special");
+
+        assertThat(result).hasSize(1);
+        String desc = result.get(0).function().description();
+        // 应包含原始 name
+        assertThat(desc).contains("my_custom_tool");
+        // 应包含原始 description
+        assertThat(desc).contains("A tool that does something special");
+        // 应包含 "Original tool definition" 标记
+        assertThat(desc).contains("Original tool definition");
+        // 应包含 JSON 代码块
+        assertThat(desc).contains("```json");
+    }
+
+    @Test
+    void shouldPreserveFreeformNoteInCustomProxyDescription() {
+        // P3-14: 保留原有 FREEFORM 提示
+        List<UnifiedTool> result = CodexToolCompat.expandCustom(
+            "my_tool", "description here");
+
+        String desc = result.get(0).function().description();
+        assertThat(desc).contains("FREEFORM");
+    }
+
+    @Test
+    void shouldHandleNullDescriptionWhenEmbeddingOriginal() {
+        // P3-14: 原始 description 为 null 时仍能正常嵌入
+        List<UnifiedTool> result = CodexToolCompat.expandCustom("my_tool", null);
+
+        String desc = result.get(0).function().description();
+        assertThat(desc).contains("my_tool");
+        assertThat(desc).contains("```json");
+    }
+
     @Test
     void shouldFlattenNamespaceTools() {
         List<UnifiedTool> children = List.of(
-            new UnifiedTool("function", new UnifiedFunctionDefinition(
-                "read_file", "Read a file", emptyParams())),
-            new UnifiedTool("function", new UnifiedFunctionDefinition(
-                "write_file", "Write a file", emptyParams()))
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name("read_file")
+                    .description("Read a file")
+                    .parameters(emptyParams())
+                    .build())
+                .build(),
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name("write_file")
+                    .description("Write a file")
+                    .parameters(emptyParams())
+                    .build())
+                .build()
         );
 
         List<UnifiedTool> result = CodexToolCompat.expandNamespace(
@@ -95,8 +147,14 @@ class CodexToolCompatTest {
     @Test
     void shouldFlattenNamespaceWithTrailingUnderscores() {
         List<UnifiedTool> children = List.of(
-            new UnifiedTool("function", new UnifiedFunctionDefinition(
-                "search_files", "Search files", emptyParams()))
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name("search_files")
+                    .description("Search files")
+                    .parameters(emptyParams())
+                    .build())
+                .build()
         );
 
         List<UnifiedTool> result = CodexToolCompat.expandNamespace(
@@ -108,8 +166,14 @@ class CodexToolCompatTest {
     @Test
     void shouldSkipNonFunctionChildrenInNamespace() {
         List<UnifiedTool> children = List.of(
-            new UnifiedTool("custom", null),
-            new UnifiedTool("function", new UnifiedFunctionDefinition("valid", null, emptyParams()))
+            UnifiedTool.builder().type("custom").build(),
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name("valid")
+                    .parameters(emptyParams())
+                    .build())
+                .build()
         );
 
         List<UnifiedTool> result = CodexToolCompat.expandNamespace("ns", null, children, null);
@@ -127,7 +191,13 @@ class CodexToolCompatTest {
     void shouldHandleNullElementInChildrenList() {
         List<UnifiedTool> children = new java.util.ArrayList<>();
         children.add(null);
-        children.add(new UnifiedTool("function", new UnifiedFunctionDefinition("ok", null, emptyParams())));
+        children.add(UnifiedTool.builder()
+            .type("function")
+            .function(UnifiedFunctionDefinition.builder()
+                .name("ok")
+                .parameters(emptyParams())
+                .build())
+            .build());
 
         List<UnifiedTool> result = CodexToolCompat.expandNamespace("ns", null, children, null);
         assertThat(result).hasSize(1);
@@ -137,7 +207,12 @@ class CodexToolCompatTest {
     @Test
     void shouldFallbackToEmptyParamsWhenNull() {
         List<UnifiedTool> children = List.of(
-            new UnifiedTool("function", new UnifiedFunctionDefinition("no_params", null, null))
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name("no_params")
+                    .build())
+                .build()
         );
 
         List<UnifiedTool> result = CodexToolCompat.expandNamespace("ns", null, children, null);
@@ -202,8 +277,14 @@ class CodexToolCompatTest {
         reqArr.add("path");
         fileParams.set("required", reqArr);
 
-        var children = List.of(new UnifiedTool("function",
-            new UnifiedFunctionDefinition("read_file", "Reads a file", fileParams)));
+        var children = List.of(UnifiedTool.builder()
+            .type("function")
+            .function(UnifiedFunctionDefinition.builder()
+                .name("read_file")
+                .description("Reads a file")
+                .parameters(fileParams)
+                .build())
+            .build());
 
         var tools = CodexToolCompat.expandNamespace(
             "mcp__filesystem__", "Filesystem ops", children, "ns0");
@@ -262,5 +343,130 @@ class CodexToolCompatTest {
         assertThat(inputDesc).contains("Top-Level Envelope");
         assertThat(inputDesc).contains("Strict Line Prefix Rules");
         assertThat(inputDesc).contains("Context and Hunk Headers");
+    }
+
+    // ===== P3-13: namespace 工具名称长度限制 =====
+
+    @Test
+    void shouldTruncateNamespaceFlatNameWhenExceeding64Chars() {
+        // 超长 namespace + 超长 name -> flatName 必然 > 64,需要截断
+        String longNs = "mcp__very_long_namespace_name_that_exceeds_the_limit__";
+        String longName = "do_something_with_a_very_long_action_name";
+        List<UnifiedTool> children = List.of(
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name(longName)
+                    .description("test")
+                    .parameters(emptyParams())
+                    .build())
+                .build()
+        );
+
+        List<UnifiedTool> result = CodexToolCompat.expandNamespace(longNs, null, children, null);
+
+        assertThat(result).hasSize(1);
+        String flatName = result.get(0).function().name();
+        assertThat(flatName.length()).isLessThanOrEqualTo(64);
+        // 截断后仍以 cleanNs 前缀开头
+        String cleanNs = longNs.replace("__", "_").replaceAll("_+$", "");
+        assertThat(flatName).startsWith(cleanNs + "_");
+    }
+
+    @Test
+    void shouldNotTruncateWhenFlatNameWithin64Chars() {
+        // 正常长度不截断
+        List<UnifiedTool> children = List.of(
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name("read_file")
+                    .description("Read a file")
+                    .parameters(emptyParams())
+                    .build())
+                .build()
+        );
+
+        List<UnifiedTool> result = CodexToolCompat.expandNamespace(
+            "mcp__filesystem__", null, children, null);
+
+        assertThat(result.get(0).function().name()).isEqualTo("mcp_filesystem_read_file");
+        assertThat(result.get(0).function().name().length()).isLessThanOrEqualTo(64);
+    }
+
+    @Test
+    void shouldProduceStableTruncatedNameForSameInput() {
+        // 相同输入应产生相同截断名(sha256 确定性)
+        String longNs = "mcp__very_long_namespace_name_that_exceeds_the_limit__";
+        String longName = "do_something_with_a_very_long_action_name";
+        List<UnifiedTool> children = List.of(
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name(longName)
+                    .description("test")
+                    .parameters(emptyParams())
+                    .build())
+                .build()
+        );
+
+        List<UnifiedTool> r1 = CodexToolCompat.expandNamespace(longNs, null, children, null);
+        List<UnifiedTool> r2 = CodexToolCompat.expandNamespace(longNs, null, children, null);
+
+        assertThat(r1.get(0).function().name()).isEqualTo(r2.get(0).function().name());
+    }
+
+    @Test
+    void shouldProduceDifferentTruncatedNamesForDifferentInputs() {
+        // 不同输入应产生不同截断名(sha256 抗碰撞)
+        String longNs = "mcp__very_long_namespace_name_that_exceeds_the_limit__";
+        List<UnifiedTool> children1 = List.of(
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name("do_something_with_a_very_long_action_name_one")
+                    .description("test")
+                    .parameters(emptyParams())
+                    .build())
+                .build()
+        );
+        List<UnifiedTool> children2 = List.of(
+            UnifiedTool.builder()
+                .type("function")
+                .function(UnifiedFunctionDefinition.builder()
+                    .name("do_something_with_a_very_long_action_name_two")
+                    .description("test")
+                    .parameters(emptyParams())
+                    .build())
+                .build()
+        );
+
+        List<UnifiedTool> r1 = CodexToolCompat.expandNamespace(longNs, null, children1, null);
+        List<UnifiedTool> r2 = CodexToolCompat.expandNamespace(longNs, null, children2, null);
+
+        assertThat(r1.get(0).function().name()).isNotEqualTo(r2.get(0).function().name());
+    }
+
+    @Test
+    void shouldExposeComputeFlatNameHelperForCallerSync() {
+        // ResponsesProtocolAdapter 调用方需要用相同计算来记录映射,暴露公共 helper
+        String cleanNs = "mcp_filesystem";
+        String originalName = "read_file";
+        String flatName = CodexToolCompat.computeFlatName(cleanNs, originalName);
+
+        assertThat(flatName).isEqualTo("mcp_filesystem_read_file");
+    }
+
+    @Test
+    void shouldTruncateViaComputeFlatNameHelper() {
+        // cleanNs 本身已超 64 字符,必须同时截断 cleanNs 和 name
+        String cleanNs = "mcp_very_long_namespace_that_will_exceed_sixty_four_chars_limit_here";
+        String originalName = "do_something_very_long_action_name_here";
+        String flatName = CodexToolCompat.computeFlatName(cleanNs, originalName);
+
+        assertThat(flatName.length()).isLessThanOrEqualTo(64);
+        // 仍以 _ 分隔,且末段为 8 位 hash
+        String[] parts = flatName.split("_");
+        assertThat(parts[parts.length - 1].length()).isEqualTo(8);
     }
 }

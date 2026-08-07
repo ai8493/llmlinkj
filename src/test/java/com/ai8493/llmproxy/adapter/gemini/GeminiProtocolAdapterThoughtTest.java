@@ -26,7 +26,7 @@ class GeminiProtocolAdapterThoughtTest {
                 .model("deepseek-v4-flash")
                 .contents(List.of(content))
                 .build(),
-            null, null, null);
+            null, null, null, null);
 
         var messages = result.messages();
         assertThat(messages).hasSize(1);

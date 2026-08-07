@@ -35,11 +35,11 @@ class ProxyOrchestratorTest {
         backendRepo.deleteAll();
     }
 
-    // 构造一个最小可用的 BackendConfigEntity（12 字段 record）
+    // 构造一个最小可用的 BackendConfigEntity（16 字段 record）
     private static BackendConfigEntity backend(String name, String protocol, String defaultModel) {
         return new BackendConfigEntity(
             name, protocol, "k", "http://localhost:8089/v1", defaultModel,
-            null, 5L, 10L, 5L, 5, 60L, "2026-01-01T00:00:00Z");
+            null, 5L, 10L, 5L, 5, 60L, null, null, null, null, "2026-01-01T00:00:00Z");
     }
 
     // 保存一条 protocol_mapping：enabled + updated_at 可控
@@ -51,7 +51,10 @@ class ProxyOrchestratorTest {
     @Test
     void shouldThrowWhenNoProtocolMapping() {
         // DB 无任何 protocol_mapping 条目，resolve 应抛"无可用后端"
-        var req = new UnifiedChatRequest("gpt-4", null, null, null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("gpt-4")
+            .stream(false)
+            .build();
         assertThatThrownBy(() -> orchestrator.handle(req, "openai"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("无可用后端")
@@ -80,7 +83,10 @@ class ProxyOrchestratorTest {
         backendRepo.save(backend("alpha", "openai", "alpha-model"));
         saveProtocolMapping("openai", "alpha", false, "2026-06-01T00:00:00Z");
 
-        var req = new UnifiedChatRequest("any-model", null, null, null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("any-model")
+            .stream(false)
+            .build();
         assertThatThrownBy(() -> orchestrator.handle(req, "openai"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("无可用后端");

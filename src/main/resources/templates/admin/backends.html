@@ -136,6 +136,35 @@
                                     <span class="input-group-text">秒</span>
                                 </div>
                             </div>
+                            <div class="col-md-3"><label class="form-label">reasoning effort 模式</label>
+                                <select id="reasoningEffortMode" class="form-select">
+                                    <option value="">默认(passthrough)</option>
+                                    <option value="passthrough">passthrough</option>
+                                    <option value="low_high">low_high</option>
+                                    <option value="openrouter">openrouter</option>
+                                    <option value="deepseek">deepseek</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3"><label class="form-label">默认 effort</label>
+                                <select id="reasoningEffortDefault" class="form-select">
+                                    <option value="">不指定</option>
+                                    <option value="none">none</option>
+                                    <option value="minimal">minimal</option>
+                                    <option value="low">low</option>
+                                    <option value="medium">medium</option>
+                                    <option value="high">high</option>
+                                    <option value="xhigh">xhigh</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3"><label class="form-label">默认 thinking type</label>
+                                <select id="thinkingDefaultType" class="form-select">
+                                    <option value="">不指定</option>
+                                    <option value="enabled">enabled</option>
+                                    <option value="disabled">disabled</option>
+                                    <option value="adaptive">adaptive</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3"><label class="form-label">默认 thinking budget</label><input id="thinkingDefaultBudget" type="number" min="0" step="1" class="form-control" placeholder="如 8000"/></div>
                         </div>
                     </div>
                 </form>

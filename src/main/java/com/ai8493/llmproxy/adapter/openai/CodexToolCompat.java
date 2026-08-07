@@ -10,6 +10,8 @@ import com.ai8493.llmproxy.model.UnifiedTool;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -40,9 +42,26 @@ public class CodexToolCompat {
 
     /**
      * 通用 custom 工具代理（非 apply_patch）
+     * P3-14: 把原始工具定义(name + description)内嵌到新 description,保留元数据供 LLM 参考
      */
     public static List<UnifiedTool> expandCustom(String name, String description) {
-        return List.of(buildTool(name, freestyleDesc(description), genericProxySchema()));
+        return List.of(buildTool(name, buildCustomProxyDescription(name, description), genericProxySchema()));
+    }
+
+    private static String buildCustomProxyDescription(String name, String originalDescription) {
+        // 嵌入原始工具定义 JSON,保留元数据
+        ObjectNode originalDef = mapper.createObjectNode();
+        originalDef.put("name", name);
+        if (originalDescription != null && !originalDescription.isEmpty()) {
+            originalDef.put("description", originalDescription);
+        }
+        String originalJson;
+        try {
+            originalJson = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(originalDef);
+        } catch (Exception e) {
+            originalJson = originalDef.toString();
+        }
+        return "Original tool definition:\n```json\n" + originalJson + "\n```\n" + freestyleDesc(originalDescription);
     }
 
     private static JsonNode addFileSchema() {
@@ -181,7 +200,14 @@ public class CodexToolCompat {
     }
 
     private static UnifiedTool buildTool(String name, String description, JsonNode params) {
-        return new UnifiedTool("function", new UnifiedFunctionDefinition(name, description, params));
+        return UnifiedTool.builder()
+            .type("function")
+            .function(UnifiedFunctionDefinition.builder()
+                .name(name)
+                .description(description)
+                .parameters(params)
+                .build())
+            .build();
     }
 
     private static String proxyDesc(String desc, String action, String defaultDesc) {
@@ -224,14 +250,13 @@ public class CodexToolCompat {
         List<UnifiedTool> result = new ArrayList<>();
         if (children == null) return result;
         String cleanNs = namespace.replace("__", "_").replaceAll("_+$", "");
-        String prefix = cleanNs + "_";
 
         for (UnifiedTool child : children) {
             if (child == null) continue;
             if (!"function".equals(child.type()) || child.function() == null) continue;
             UnifiedFunctionDefinition fn = child.function();
             if (fn.name() == null) continue;
-            String flatName = prefix + fn.name();
+            String flatName = computeFlatName(cleanNs, fn.name());
             String desc = combineDesc(namespaceDesc, fn.description());
             JsonNode params = fn.parameters();
             if (params == null) params = emptyParams();
@@ -239,10 +264,48 @@ public class CodexToolCompat {
                 ? injectCustomNs(params.deepCopy(), alias)
                 : params;
 
-            result.add(new UnifiedTool("function",
-                    new UnifiedFunctionDefinition(flatName, desc, paramsWithNs)));
+            result.add(UnifiedTool.builder()
+                    .type("function")
+                    .function(UnifiedFunctionDefinition.builder()
+                        .name(flatName)
+                        .description(desc)
+                        .parameters(paramsWithNs)
+                        .build())
+                    .build());
         }
         return result;
+    }
+
+    /**
+     * 计算 namespace 工具的 flatName,若超过 64 字符则用 sha256 截断。
+     * 调用方(ResponsesProtocolAdapter)需用此 helper 保证 flatName 计算一致,
+     * 以便响应侧通过 ToolRemapContext 还原。
+     */
+    public static String computeFlatName(String cleanNs, String originalName) {
+        String flatName = cleanNs + "_" + originalName;
+        if (flatName.length() <= 64) return flatName;
+        // 截断:用 sha256(flatName) 前 8 位替代 originalName;若 cleanNs 仍超长,再截 cleanNs
+        String hash = sha256Hex(flatName).substring(0, 8);
+        int maxNsLen = 64 - 1 - hash.length();  // 留 1 位给 "_"
+        String nsPrefix = cleanNs.length() <= maxNsLen
+            ? cleanNs
+            : cleanNs.substring(0, maxNsLen);
+        return nsPrefix + "_" + hash;
+    }
+
+    private static String sha256Hex(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 是 JDK 必备算法,理论上不会缺失
+            throw new IllegalStateException("SHA-256 不可用", e);
+        }
     }
 
     private static String combineDesc(String nsDesc, String childDesc) {
@@ -315,7 +378,14 @@ public class CodexToolCompat {
         required.add("input");
         params.set("required", required);
 
-        return List.of(new UnifiedTool("function", new UnifiedFunctionDefinition(name, description, params)));
+        return List.of(UnifiedTool.builder()
+            .type("function")
+            .function(UnifiedFunctionDefinition.builder()
+                .name(name)
+                .description(description)
+                .parameters(params)
+                .build())
+            .build());
     }
 
     private static String readResource(String path) {

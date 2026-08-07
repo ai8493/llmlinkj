@@ -5,12 +5,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import com.ai8493.llmproxy.adapter.ProtocolAdapter;
 import com.ai8493.llmproxy.exception.BackendApiException;
+import com.ai8493.llmproxy.exception.TransformException;
 import com.ai8493.llmproxy.model.*;
+import com.ai8493.llmproxy.model.extensions.OpenAiExtensions;
 import com.openai.core.JsonValue;
 import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
 import com.openai.models.chat.completions.*;
 import com.openai.models.completions.CompletionUsage;
+import com.openai.models.completions.CompletionUsage.PromptTokensDetails;
+import com.openai.models.completions.CompletionUsage.CompletionTokensDetails;
 import org.springframework.stereotype.Component;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -51,7 +55,64 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
 
             UnifiedToolChoice toolChoice = parseToolChoice(root.get("tool_choice"));
 
-            return new UnifiedChatRequest(model, messages, config, tools, toolChoice, stream);
+            // 从 raw JSON 读 OpenAI 专属字段
+            OpenAiExtensions openaiExt = null;
+            if (root.has("logprobs") || root.has("top_logprobs") || root.has("seed")
+                    || root.has("n") || root.has("response_format") || root.has("logit_bias")
+                    || root.has("metadata") || root.has("store") || root.has("audio")
+                    || root.has("modalities") || root.has("prediction")
+                    || root.has("web_search_options")) {
+                OpenAiExtensions.Builder extBuilder = OpenAiExtensions.builder();
+                if (root.has("logprobs")) {
+                    extBuilder.logprobs(root.get("logprobs").asBoolean());
+                }
+                if (root.has("top_logprobs")) {
+                    extBuilder.topLogprobs(root.get("top_logprobs").asInt());
+                }
+                if (root.has("seed")) {
+                    extBuilder.seed(root.get("seed").asLong());
+                }
+                if (root.has("n")) {
+                    extBuilder.n(root.get("n").asInt());
+                }
+                if (root.has("response_format")) {
+                    extBuilder.responseFormat(root.get("response_format"));
+                }
+                if (root.has("logit_bias")) {
+                    extBuilder.logitBias(root.get("logit_bias"));
+                }
+                if (root.has("metadata")) {
+                    extBuilder.metadata(root.get("metadata"));
+                }
+                if (root.has("store")) {
+                    extBuilder.store(root.get("store").asBoolean());
+                }
+                if (root.has("audio")) {
+                    extBuilder.audio(root.get("audio"));
+                }
+                if (root.has("modalities") && root.get("modalities").isArray()) {
+                    List<String> modalities = new ArrayList<>();
+                    for (JsonNode m : root.get("modalities")) modalities.add(m.asText());
+                    extBuilder.modalities(modalities);
+                }
+                if (root.has("prediction")) {
+                    extBuilder.prediction(root.get("prediction"));
+                }
+                if (root.has("web_search_options")) {
+                    extBuilder.webSearchOptions(root.get("web_search_options"));
+                }
+                openaiExt = extBuilder.build();
+            }
+
+            return UnifiedChatRequest.builder()
+                .model(model)
+                .messages(messages)
+                .config(config)
+                .tools(tools)
+                .toolChoice(toolChoice)
+                .stream(stream)
+                .openai(openaiExt)
+                .build();
         } catch (Exception e) {
             throw new IllegalArgumentException("无法解析 OpenAI 请求: " + e.getMessage(), e);
         }
@@ -65,7 +126,22 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
         List<UnifiedMessage> result = new ArrayList<>();
         for (JsonNode msg : messagesNode) {
             String role = msg.has("role") ? msg.get("role").asText() : "user";
-            String content = parseContent(msg.get("content"));
+            JsonNode contentNode = msg.get("content");
+            String content = null;
+            List<UnifiedPart> parts = null;
+            if (contentNode != null && !contentNode.isNull()) {
+                if (contentNode.isTextual()) {
+                    content = contentNode.asText();
+                } else if (contentNode.isArray()) {
+                    parts = parseContentParts(contentNode);
+                    // 纯文本 parts 回填 content,方便下游走单文本分支
+                    if (parts != null && parts.size() == 1
+                            && parts.get(0) instanceof UnifiedPart.TextPart t) {
+                        content = t.text();
+                        parts = null;
+                    }
+                }
+            }
             String name = msg.has("name") ? msg.get("name").asText() : null;
             String toolCallId = msg.has("tool_call_id") ? msg.get("tool_call_id").asText() : null;
 
@@ -74,31 +150,54 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
                 toolCalls = parseMessageToolCalls(msg.get("tool_calls"));
             }
 
-            result.add(new UnifiedMessage(
-                switch (role) {
-                    case "system" -> UnifiedMessage.Role.SYSTEM;
+            result.add(UnifiedMessage.builder()
+                .role(switch (role) {
+                    case "system", "developer" -> UnifiedMessage.Role.SYSTEM;
                     case "user" -> UnifiedMessage.Role.USER;
                     case "assistant" -> UnifiedMessage.Role.ASSISTANT;
                     case "tool" -> UnifiedMessage.Role.TOOL;
                     default -> UnifiedMessage.Role.USER;
-                },
-                content,
-                null,  // parts — 多模态 content 保留为 JSON 字符串在 content 中
-                toolCalls,
-                toolCallId,
-                name,
-                null  // reasoningContent
-            ));
+                })
+                .content(content)
+                .parts(parts)
+                .toolCalls(toolCalls)
+                .toolCallId(toolCallId)
+                .name(name)
+                .build());
         }
         return result;
     }
 
-    /** 解析 content 字段：字符串直接返回，数组序列化为 JSON 字符串，null 返回 null */
-    private String parseContent(JsonNode contentNode) {
-        if (contentNode == null || contentNode.isNull()) return null;
-        if (contentNode.isTextual()) return contentNode.asText();
-        if (contentNode.isArray()) return contentNode.toString();
-        return contentNode.asText();
+    /** 解析 content 数组 -> List<UnifiedPart>,null/非数组返回 null */
+    private List<UnifiedPart> parseContentParts(JsonNode contentNode) {
+        if (contentNode == null || !contentNode.isArray()) return null;
+        List<UnifiedPart> result = new ArrayList<>();
+        for (JsonNode part : contentNode) {
+            String type = part.has("type") ? part.get("type").asText() : "text";
+            switch (type) {
+                case "text" -> {
+                    if (part.has("text")) {
+                        result.add(new UnifiedPart.TextPart(part.get("text").asText()));
+                    }
+                }
+                case "image_url" -> {
+                    if (part.has("image_url")) {
+                        JsonNode img = part.get("image_url");
+                        var imageData = mapper.createObjectNode();
+                        imageData.put("url", img.path("url").asText(""));
+                        imageData.put("detail", img.has("detail") ? img.get("detail").asText("") : null);
+                        result.add(new UnifiedPart.ImagePart(imageData));
+                    }
+                }
+                default -> {
+                    // 未知 part 类型保留为 TextPart(text 字段兜底)
+                    if (part.has("text")) {
+                        result.add(new UnifiedPart.TextPart(part.get("text").asText()));
+                    }
+                }
+            }
+        }
+        return result.isEmpty() ? null : result;
     }
 
     /** 解析 assistant 消息中的 tool_calls 数组 */
@@ -123,7 +222,14 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
                     }
                 }
             }
-            result.add(new UnifiedToolCall(id, type, new UnifiedFunctionCall(fnName, fnArgs)));
+            result.add(UnifiedToolCall.builder()
+                .id(id)
+                .type(type)
+                .function(UnifiedFunctionCall.builder()
+                    .name(fnName)
+                    .arguments(fnArgs)
+                    .build())
+                .build());
         }
         return result.isEmpty() ? null : result;
     }
@@ -139,7 +245,14 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
                 String fnName = fnNode.has("name") ? fnNode.get("name").asText() : null;
                 String fnDesc = fnNode.has("description") ? fnNode.get("description").asText() : null;
                 JsonNode fnParams = fnNode.has("parameters") ? fnNode.get("parameters") : null;
-                result.add(new UnifiedTool(type, new UnifiedFunctionDefinition(fnName, fnDesc, fnParams)));
+                result.add(UnifiedTool.builder()
+                    .type(type)
+                    .function(UnifiedFunctionDefinition.builder()
+                        .name(fnName)
+                        .description(fnDesc)
+                        .parameters(fnParams)
+                        .build())
+                    .build());
             }
         }
         return result.isEmpty() ? null : result;
@@ -150,18 +263,20 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
         if (tcNode == null || tcNode.isNull()) return null;
         if (tcNode.isTextual()) {
             return switch (tcNode.asText()) {
-                case "none" -> new UnifiedToolChoice.None();
-                case "required" -> new UnifiedToolChoice.Auto();
-                default -> new UnifiedToolChoice.Auto();
+                case "none" -> UnifiedToolChoice.None.builder().build();
+                case "required" -> UnifiedToolChoice.Any.builder().build();
+                default -> UnifiedToolChoice.Auto.builder().build();
             };
         }
         if (tcNode.isObject() && tcNode.has("function")) {
             JsonNode fn = tcNode.get("function");
             if (fn.has("name")) {
-                return new UnifiedToolChoice.Required(fn.get("name").asText());
+                return UnifiedToolChoice.Required.builder()
+                    .functionName(fn.get("name").asText())
+                    .build();
             }
         }
-        return new UnifiedToolChoice.Auto();
+        return UnifiedToolChoice.Auto.builder().build();
     }
 
     /** 解析 generation config */
@@ -169,6 +284,17 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
         Double temperature = root.has("temperature") ? root.get("temperature").asDouble() : null;
         Double topP = root.has("top_p") ? root.get("top_p").asDouble() : null;
         Integer maxTokens = root.has("max_tokens") ? root.get("max_tokens").asInt() : null;
+        Integer maxCompletionTokens = root.has("max_completion_tokens")
+            ? root.get("max_completion_tokens").asInt() : null;
+        String reasoningEffort = root.has("reasoning_effort")
+            ? root.get("reasoning_effort").asText() : null;
+        Boolean parallelToolCalls = root.has("parallel_tool_calls")
+            ? root.get("parallel_tool_calls").asBoolean() : null;
+        Double presencePenalty = root.has("presence_penalty")
+            ? root.get("presence_penalty").asDouble() : null;
+        Double frequencyPenalty = root.has("frequency_penalty")
+            ? root.get("frequency_penalty").asDouble() : null;
+        Long seed = root.has("seed") ? root.get("seed").asLong() : null;
         List<String> stop = null;
         if (root.has("stop")) {
             JsonNode stopNode = root.get("stop");
@@ -179,7 +305,18 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
                 for (JsonNode s : stopNode) stop.add(s.asText());
             }
         }
-        return new UnifiedGenerationConfig(temperature, topP, maxTokens, stop, null, null, null, null);
+        return UnifiedGenerationConfig.builder()
+            .temperature(temperature)
+            .topP(topP)
+            .maxOutputTokens(maxTokens)
+            .maxCompletionTokens(maxCompletionTokens)
+            .reasoningEffort(reasoningEffort)
+            .parallelToolCalls(parallelToolCalls)
+            .presencePenalty(presencePenalty)
+            .frequencyPenalty(frequencyPenalty)
+            .seed(seed)
+            .stopSequences(stop)
+            .build();
     }
 
     /** Type-safe entry point for Controller */
@@ -190,13 +327,12 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
                 .toList()
         );
 
-        UnifiedGenerationConfig config = new UnifiedGenerationConfig(
-                req.temperature().orElse(null),
-                req.topP().orElse(null),
-                req.maxTokens().map(Long::intValue).orElse(null),
-                req.stop().map(this::mapStop).orElse(null),
-                null, null, null, null
-        );
+        UnifiedGenerationConfig config = UnifiedGenerationConfig.builder()
+                .temperature(req.temperature().orElse(null))
+                .topP(req.topP().orElse(null))
+                .maxOutputTokens(req.maxTokens().map(Long::intValue).orElse(null))
+                .stopSequences(req.stop().map(this::mapStop).orElse(null))
+                .build();
 
         List<UnifiedTool> tools = null;
         if (req.tools().isPresent() && !req.tools().get().isEmpty()) {
@@ -212,14 +348,14 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
             toolChoice = mapToolChoice(req.toolChoice().get());
         }
 
-        return new UnifiedChatRequest(
-                req.model().toString(),
-                messages,
-                config,
-                tools,
-                toolChoice,
-                stream
-        );
+        return UnifiedChatRequest.builder()
+                .model(req.model().toString())
+                .messages(messages)
+                .config(config)
+                .tools(tools)
+                .toolChoice(toolChoice)
+                .stream(stream)
+                .build();
     }
 
     @Override
@@ -228,7 +364,7 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
             ChatCompletion resp = mapToChatCompletion(uResp);
             return mapper.writeValueAsBytes(resp);
         } catch (Exception e) {
-            throw new RuntimeException("序列化 OpenAI 响应失败", e);
+            throw new TransformException("序列化 OpenAI 响应失败", e);
         }
     }
 
@@ -238,7 +374,7 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
             ChatCompletionChunk c = mapToChatCompletionChunk(chunk);
             return mapper.writeValueAsString(c);
         } catch (Exception e) {
-            throw new RuntimeException("序列化流块失败: " + e.getMessage(), e);
+            throw new TransformException("序列化流块失败: " + e.getMessage(), e);
         }
     }
 
@@ -283,26 +419,18 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
     private UnifiedMessage mapMessage(ChatCompletionMessageParam param) {
         if (param.isSystem()) {
             var sys = param.asSystem();
-            return new UnifiedMessage(
-                    UnifiedMessage.Role.SYSTEM,
-                    sys.content().isText() ? sys.content().asText() : null,
-                    null, // parts
-                    null, // toolCalls
-                    null, // toolCallId
-                    sys.name().orElse(null), // name
-                    null // reasoningContent
-            );
+            return UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.SYSTEM)
+                    .content(sys.content().isText() ? sys.content().asText() : null)
+                    .name(sys.name().orElse(null))
+                    .build();
         } else if (param.isUser()) {
             var user = param.asUser();
-            return new UnifiedMessage(
-                    UnifiedMessage.Role.USER,
-                    user.content().isText() ? user.content().asText() : null,
-                    null, // parts
-                    null, // toolCalls
-                    null, // toolCallId
-                    user.name().orElse(null), // name
-                    null // reasoningContent
-            );
+            return UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.USER)
+                    .content(user.content().isText() ? user.content().asText() : null)
+                    .name(user.name().orElse(null))
+                    .build();
         } else if (param.isAssistant()) {
             var asst = param.asAssistant();
             List<UnifiedToolCall> toolCalls = null;
@@ -314,39 +442,31 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
             String content = asst.content()
                     .map(c -> c.isText() ? c.asText() : null)
                     .orElse(null);
-            return new UnifiedMessage(
-                    UnifiedMessage.Role.ASSISTANT,
-                    content,
-                    null, // parts
-                    toolCalls,
-                    null, // toolCallId
-                    asst.name().orElse(null), // name
-                    null // reasoningContent
-            );
+            return UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .content(content)
+                    .toolCalls(toolCalls)
+                    .name(asst.name().orElse(null))
+                    .build();
         } else if (param.isTool()) {
             var tool = param.asTool();
-            return new UnifiedMessage(
-                    UnifiedMessage.Role.TOOL,
-                    tool.content().isText() ? tool.content().asText() : null,
-                    null, // parts
-                    null, // toolCalls
-                    tool.toolCallId(),
-                    null, // name
-                    null // reasoningContent
-            );
+            return UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.TOOL)
+                    .content(tool.content().isText() ? tool.content().asText() : null)
+                    .toolCallId(tool.toolCallId())
+                    .build();
         } else if (param.isDeveloper()) {
-            // developer 消息降级为 user
+            // developer 消息降级为 SYSTEM(OpenAI developer 与 system 语义等价,都是系统指令)
             var dev = param.asDeveloper();
-            return new UnifiedMessage(
-                    UnifiedMessage.Role.USER,
-                    dev.content().isText() ? dev.content().asText() : null,
-                    null, null, null, null, null
-            );
+            return UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.SYSTEM)
+                    .content(dev.content().isText() ? dev.content().asText() : null)
+                    .build();
         } else {
             // function（已弃用）— 降级为 user
-            return new UnifiedMessage(
-                    UnifiedMessage.Role.USER, null, null, null, null, null, null
-            );
+            return UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.USER)
+                    .build();
         }
     }
 
@@ -360,27 +480,30 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
             } catch (Exception e) {
                 argsNode = mapper.createObjectNode();
             }
-            return new UnifiedToolCall(
-                    fn.id(),
-                    "function",
-                    new UnifiedFunctionCall(
-                            fn.function().name(),
-                            argsNode
-                    )
-            );
+            return UnifiedToolCall.builder()
+                    .id(fn.id())
+                    .type("function")
+                    .function(UnifiedFunctionCall.builder()
+                            .name(fn.function().name())
+                            .arguments(argsNode)
+                            .build())
+                    .build();
         }
         // custom tool call — 降级为空 tool call
-        return new UnifiedToolCall("", "custom", null);
+        return UnifiedToolCall.builder()
+                .id("")
+                .type("custom")
+                .build();
     }
 
     /** 将 ChatCompletionTool 映射为 UnifiedTool */
     private UnifiedTool mapTool(ChatCompletionTool tool) {
         if (tool.isFunction()) {
             var fn = tool.asFunction();
-            return new UnifiedTool(
-                    "function",
-                    mapFunctionDefinition(fn.function())
-            );
+            return UnifiedTool.builder()
+                    .type("function")
+                    .function(mapFunctionDefinition(fn.function()))
+                    .build();
         }
         // custom tool — Phase 1 不支持
         return null;
@@ -392,11 +515,11 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
         if (fn.parameters().isPresent()) {
             paramsNode = functionParametersToJsonNode(fn.parameters().get());
         }
-        return new UnifiedFunctionDefinition(
-                fn.name(),
-                fn.description().orElse(null),
-                paramsNode
-        );
+        return UnifiedFunctionDefinition.builder()
+                .name(fn.name())
+                .description(fn.description().orElse(null))
+                .parameters(paramsNode)
+                .build();
     }
 
     /** 将 SDK FunctionParameters 转为 Jackson JsonNode */
@@ -423,20 +546,22 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
         if (tc.isAuto()) {
             var auto = tc.asAuto();
             if (auto == ChatCompletionToolChoiceOption.Auto.NONE) {
-                return new UnifiedToolChoice.None();
+                return UnifiedToolChoice.None.builder().build();
             }
             // AUTO 或 REQUIRED → IR 统一为 Auto
-            return new UnifiedToolChoice.Auto();
+            return UnifiedToolChoice.Auto.builder().build();
         }
         if (tc.isAllowedToolChoice()) {
             // "required"（不指定具体函数）→ Auto
-            return new UnifiedToolChoice.Auto();
+            return UnifiedToolChoice.Auto.builder().build();
         }
         if (tc.isNamedToolChoice()) {
             var named = tc.asNamedToolChoice();
-            return new UnifiedToolChoice.Required(named.function().name());
+            return UnifiedToolChoice.Required.builder()
+                .functionName(named.function().name())
+                .build();
         }
-        return new UnifiedToolChoice.Auto();
+        return UnifiedToolChoice.Auto.builder().build();
     }
 
     // ========================================================================
@@ -468,11 +593,21 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
 
         CompletionUsage usage = null;
         if (uResp.usage() != null) {
-            usage = CompletionUsage.builder()
+            var usageBuilder = CompletionUsage.builder()
                     .promptTokens(uResp.usage().promptTokens())
                     .completionTokens(uResp.usage().completionTokens())
-                    .totalTokens(uResp.usage().totalTokens())
-                    .build();
+                    .totalTokens(uResp.usage().totalTokens());
+            if (uResp.usage().cachedTokens() > 0) {
+                usageBuilder.promptTokensDetails(PromptTokensDetails.builder()
+                    .cachedTokens(uResp.usage().cachedTokens())
+                    .build());
+            }
+            if (uResp.usage().reasoningTokens() > 0) {
+                usageBuilder.completionTokensDetails(CompletionTokensDetails.builder()
+                    .reasoningTokens(uResp.usage().reasoningTokens())
+                    .build());
+            }
+            usage = usageBuilder.build();
         }
 
         ChatCompletion.Builder builder = ChatCompletion.builder()
@@ -501,8 +636,8 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
         // role
         builder.role(JsonValue.from("assistant"));
 
-        // refusal (required field in SDK v3.x, set to empty)
-        builder.refusal(Optional.empty());
+        // refusal(SDK 必填字段,从 IR 读,空时设 empty)
+        builder.refusal(msg.refusal() != null ? Optional.of(msg.refusal()) : Optional.empty());
 
         // content
         if (msg.content() != null) {
@@ -532,10 +667,46 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
         return builder.build();
     }
 
-    /** 将 IR finishReason（String）转为 SDK FinishReason，null 时默认为 STOP */
+    /** 将 IR finishReason(String)转为 SDK FinishReason,null 时默认为 STOP。
+     * spec 第 5 节:同协议合法值直接用,跨协议按语义映射。 */
     private ChatCompletion.Choice.FinishReason mapFinishReason(String reason) {
         if (reason == null) return ChatCompletion.Choice.FinishReason.STOP;
-        return ChatCompletion.Choice.FinishReason.of(reason);
+        // OpenAI 合法值直接用(同协议零损失)
+        switch (reason) {
+            case "stop", "length", "tool_calls", "content_filter", "function_call":
+                return ChatCompletion.Choice.FinishReason.of(reason);
+        }
+        // 跨协议:按语义映射
+        return switch (reason) {
+            case "STOP", "end_turn", "stop_sequence", "tool_use" ->
+                ChatCompletion.Choice.FinishReason.STOP;
+            case "MAX_TOKENS", "max_tokens" ->
+                ChatCompletion.Choice.FinishReason.LENGTH;
+            case "SAFETY", "RECITATION", "content_filter" ->
+                ChatCompletion.Choice.FinishReason.CONTENT_FILTER;
+            default -> ChatCompletion.Choice.FinishReason.STOP;
+        };
+    }
+
+    /** 流式版本:将 IR finishReason(String)转为 Chunk FinishReason。
+     * spec 第 5 节:同协议合法值直接用,跨协议按语义映射。 */
+    private ChatCompletionChunk.Choice.FinishReason mapChunkFinishReason(String reason) {
+        if (reason == null) return ChatCompletionChunk.Choice.FinishReason.STOP;
+        // OpenAI 合法值直接用(同协议零损失)
+        switch (reason) {
+            case "stop", "length", "tool_calls", "content_filter", "function_call":
+                return ChatCompletionChunk.Choice.FinishReason.of(reason);
+        }
+        // 跨协议:按语义映射
+        return switch (reason) {
+            case "STOP", "end_turn", "stop_sequence", "tool_use" ->
+                ChatCompletionChunk.Choice.FinishReason.STOP;
+            case "MAX_TOKENS", "max_tokens" ->
+                ChatCompletionChunk.Choice.FinishReason.LENGTH;
+            case "SAFETY", "RECITATION", "content_filter" ->
+                ChatCompletionChunk.Choice.FinishReason.CONTENT_FILTER;
+            default -> ChatCompletionChunk.Choice.FinishReason.STOP;
+        };
     }
 
     /** 将 UnifiedChatResponse 转为 ChatCompletionChunk（SSE 流式块） */
@@ -553,8 +724,29 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
                         if (c.delta().role() != null) {
                             deltaBuilder.role(ChatCompletionChunk.Choice.Delta.Role.of(c.delta().role()));
                         }
+                        // reasoning_content(通过 additionalProperty 透传,SDK 无原生字段)
+                        if (c.delta().reasoningContent() != null) {
+                            deltaBuilder.putAdditionalProperty("reasoning_content",
+                                JsonValue.from(c.delta().reasoningContent()));
+                        }
+
+                        // 合并 toolCalls(start 信号,id+name) + toolCallArgumentDeltas(argument 增量,带 index)
+                        List<ChatCompletionChunk.Choice.Delta.ToolCall> allToolCalls = new ArrayList<>();
                         if (c.delta().toolCalls() != null && !c.delta().toolCalls().isEmpty()) {
-                            deltaBuilder.toolCalls(mapDeltaToolCalls(c.delta().toolCalls()));
+                            allToolCalls.addAll(mapDeltaToolCalls(c.delta().toolCalls()));
+                        }
+                        if (c.delta().toolCallArgumentDeltas() != null) {
+                            for (IndexedArgumentDelta d : c.delta().toolCallArgumentDeltas()) {
+                                allToolCalls.add(ChatCompletionChunk.Choice.Delta.ToolCall.builder()
+                                    .index(d.index() != null ? d.index() : 0)
+                                    .function(ChatCompletionChunk.Choice.Delta.ToolCall.Function.builder()
+                                        .arguments(d.partialJson())
+                                        .build())
+                                    .build());
+                            }
+                        }
+                        if (!allToolCalls.isEmpty()) {
+                            deltaBuilder.toolCalls(allToolCalls);
                         }
                     } else {
                         deltaBuilder.content(Optional.empty());
@@ -562,8 +754,7 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
 
                     Optional<ChatCompletionChunk.Choice.FinishReason> finishReason = Optional.empty();
                     if (c.finishReason() != null) {
-                        finishReason = Optional.of(
-                            ChatCompletionChunk.Choice.FinishReason.of(c.finishReason()));
+                        finishReason = Optional.of(mapChunkFinishReason(c.finishReason()));
                     }
 
                     return ChatCompletionChunk.Choice.builder()
@@ -574,13 +765,33 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
                 })
                 .toList();
 
-        return ChatCompletionChunk.builder()
+        var chunkBuilder = ChatCompletionChunk.builder()
                 .id(chunk.id() != null ? chunk.id() : "chatcmpl-" + UUID.randomUUID())
                 .object_(JsonValue.from("chat.completion.chunk"))
                 .created(chunk.created() != 0 ? chunk.created() : Instant.now().getEpochSecond())
                 .model(chunk.model())
-                .choices(choices)
-                .build();
+                .choices(choices);
+
+        // 流式 usage(最后 chunk 含 usage)
+        if (chunk.usage() != null) {
+            var usageBuilder = CompletionUsage.builder()
+                    .promptTokens(chunk.usage().promptTokens())
+                    .completionTokens(chunk.usage().completionTokens())
+                    .totalTokens(chunk.usage().totalTokens());
+            if (chunk.usage().cachedTokens() > 0) {
+                usageBuilder.promptTokensDetails(PromptTokensDetails.builder()
+                    .cachedTokens(chunk.usage().cachedTokens())
+                    .build());
+            }
+            if (chunk.usage().reasoningTokens() > 0) {
+                usageBuilder.completionTokensDetails(CompletionTokensDetails.builder()
+                    .reasoningTokens(chunk.usage().reasoningTokens())
+                    .build());
+            }
+            chunkBuilder.usage(usageBuilder.build());
+        }
+
+        return chunkBuilder.build();
     }
 
     /** 将 IR 的 UnifiedToolCall 列表转为 SDK 的 Delta.ToolCall 列表 */
@@ -596,7 +807,7 @@ public class OpenAiProtocolAdapter implements ProtocolAdapter {
                     fnBuilder.arguments(tc.function().arguments().toString());
                 }
                 result.add(ChatCompletionChunk.Choice.Delta.ToolCall.builder()
-                    .index(i)
+                    .index(tc.index() != null ? tc.index() : i)
                     .id(tc.id() != null ? tc.id() : "")
                     .function(fnBuilder.build())
                     .build());

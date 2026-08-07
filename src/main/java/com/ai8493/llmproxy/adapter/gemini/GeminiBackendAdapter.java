@@ -16,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
+import reactor.core.scheduler.Schedulers;
 
 public class GeminiBackendAdapter implements BackendAdapter {
 
@@ -83,7 +84,8 @@ public class GeminiBackendAdapter implements BackendAdapter {
                 sink.error(new BackendApiException(
                     backendName, 502, "Gemini API 调用失败: " + e.getMessage()));
             }
-        }, FluxSink.OverflowStrategy.BUFFER);
+        }, FluxSink.OverflowStrategy.BUFFER)
+        .subscribeOn(Schedulers.boundedElastic());
     }
 
     @Override
@@ -96,7 +98,11 @@ public class GeminiBackendAdapter implements BackendAdapter {
                 String id = model.name()
                     .map(n -> n.replace("models/", ""))
                     .orElse("unknown");
-                result.add(new com.ai8493.llmproxy.model.ModelInfo(id, 0L, "google"));
+                result.add(com.ai8493.llmproxy.model.ModelInfo.builder()
+                    .id(id)
+                    .created(0L)
+                    .ownedBy("google")
+                    .build());
             }
             log.debug("{} 模型列表: {} 个模型", backendName, result.size());
             return result;

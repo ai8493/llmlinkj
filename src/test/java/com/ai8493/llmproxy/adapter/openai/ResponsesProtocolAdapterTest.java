@@ -10,11 +10,10 @@ import java.util.Objects;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 
 class ResponsesProtocolAdapterTest {
 
-    private final ResponsesProtocolAdapter adapter = new ResponsesProtocolAdapter();
+    private final ResponsesProtocolAdapter adapter = new ResponsesProtocolAdapter(null);
 
     @Test
     void shouldParseStringInput() {
@@ -112,13 +111,24 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldConvertPlainTextToResponse() {
-        UnifiedChatResponse uResp = new UnifiedChatResponse(
-            "resp_abc", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0,
-                new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, "Hello!", null, null, null, null, null),
-                null, "stop", null)),
-            new UnifiedUsage(10, 5, 15, 0, 0),
-            null);
+        UnifiedChatResponse uResp = UnifiedChatResponse.builder()
+            .id("resp_abc")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .content("Hello!")
+                    .build())
+                .finishReason("stop")
+                .build()))
+            .usage(UnifiedUsage.builder()
+                .promptTokens(10)
+                .completionTokens(5)
+                .totalTokens(15)
+                .build())
+            .build();
 
         byte[] raw = adapter.fromUnifiedResponse(uResp);
         String json = new String(raw, StandardCharsets.UTF_8);
@@ -134,16 +144,26 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldConvertToolCallsToResponse() {
-        UnifiedChatResponse uResp = new UnifiedChatResponse(
-            "resp_def", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0,
-                new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null, null,
-                    List.of(new UnifiedToolCall("call_xyz", "function",
-                        new UnifiedFunctionCall("get_weather",
-                            new ObjectMapper().createObjectNode().put("city", "Beijing")))),
-                    null, null, null),
-                null, "tool_calls", null)),
-            null, null);
+        UnifiedChatResponse uResp = UnifiedChatResponse.builder()
+            .id("resp_def")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .toolCalls(List.of(UnifiedToolCall.builder()
+                        .id("call_xyz")
+                        .type("function")
+                        .function(UnifiedFunctionCall.builder()
+                            .name("get_weather")
+                            .arguments(new ObjectMapper().createObjectNode().put("city", "Beijing"))
+                            .build())
+                        .build()))
+                    .build())
+                .finishReason("tool_calls")
+                .build()))
+            .build();
 
         byte[] raw = adapter.fromUnifiedResponse(uResp);
         String json = new String(raw, StandardCharsets.UTF_8);
@@ -154,11 +174,18 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldEmitLifecycleEventsOnFirstChunk() {
-        UnifiedChatResponse chunk = new UnifiedChatResponse(
-            "resp_1", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0, null,
-                new UnifiedDelta("assistant", "Hello", null, null), null, null)),
-            null, null);
+        UnifiedChatResponse chunk = UnifiedChatResponse.builder()
+            .id("resp_1")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .delta(UnifiedDelta.builder()
+                    .role("assistant")
+                    .content("Hello")
+                    .build())
+                .build()))
+            .build();
 
         List<String> events = adapter.toStreamEvents(chunk, true, true);
 
@@ -173,11 +200,18 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldSkipLifecycleAfterFirstChunk() {
-        UnifiedChatResponse chunk = new UnifiedChatResponse(
-            "resp_1", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0, null,
-                new UnifiedDelta("assistant", " world", null, null), null, null)),
-            null, null);
+        UnifiedChatResponse chunk = UnifiedChatResponse.builder()
+            .id("resp_1")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .delta(UnifiedDelta.builder()
+                    .role("assistant")
+                    .content(" world")
+                    .build())
+                .build()))
+            .build();
 
         List<String> events = adapter.toStreamEvents(chunk, false, false);
 
@@ -188,10 +222,15 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldEmitCompletionEventsOnFinishReason() {
-        UnifiedChatResponse chunk = new UnifiedChatResponse(
-            "resp_1", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0, null, null, "stop", null)),
-            null, null);
+        UnifiedChatResponse chunk = UnifiedChatResponse.builder()
+            .id("resp_1")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .finishReason("stop")
+                .build()))
+            .build();
 
         List<String> events = adapter.toStreamEvents(chunk, false, false);
 
@@ -214,11 +253,18 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldEscapeSpecialCharsInStreamDelta() {
-        UnifiedChatResponse chunk = new UnifiedChatResponse(
-            "resp_1", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0, null,
-                new UnifiedDelta("assistant", "say \"hello\"\nnew line", null, null), null, null)),
-            null, null);
+        UnifiedChatResponse chunk = UnifiedChatResponse.builder()
+            .id("resp_1")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .delta(UnifiedDelta.builder()
+                    .role("assistant")
+                    .content("say \"hello\"\nnew line")
+                    .build())
+                .build()))
+            .build();
 
         List<String> events = adapter.toStreamEvents(chunk, false, false);
 
@@ -326,18 +372,29 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldRemapCustomToolCallsToCustomToolCallInResponse() {
-        UnifiedToolCall tc = new UnifiedToolCall("call_1", "function",
-            new UnifiedFunctionCall("apply_patch",
-                new ObjectMapper().createObjectNode()
-                    .put("input", "*** Begin Patch\n*** Add File: hello.txt\n+Hello\n*** End Patch")));
+        UnifiedToolCall tc = UnifiedToolCall.builder()
+            .id("call_1")
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("apply_patch")
+                .arguments(new ObjectMapper().createObjectNode()
+                    .put("input", "*** Begin Patch\n*** Add File: hello.txt\n+Hello\n*** End Patch"))
+                .build())
+            .build();
 
-        UnifiedChatResponse uResp = new UnifiedChatResponse(
-            "resp_1", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0,
-                new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null, null,
-                    List.of(tc), null, null, null),
-                null, "tool_calls", null)),
-            null, null);
+        UnifiedChatResponse uResp = UnifiedChatResponse.builder()
+            .id("resp_1")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .toolCalls(List.of(tc))
+                    .build())
+                .finishReason("tool_calls")
+                .build()))
+            .build();
 
         ToolRemapContext ctx = new ToolRemapContext();
         ctx.putCustom("apply_patch", "apply_patch", ToolRemapContext.Kind.APPLY_PATCH);
@@ -353,17 +410,28 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldRemapGenericCustomToolCallInResponse() {
-        UnifiedToolCall tc = new UnifiedToolCall("call_2", "function",
-            new UnifiedFunctionCall("my_custom",
-                new ObjectMapper().createObjectNode().put("input", "freeform text")));
+        UnifiedToolCall tc = UnifiedToolCall.builder()
+            .id("call_2")
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("my_custom")
+                .arguments(new ObjectMapper().createObjectNode().put("input", "freeform text"))
+                .build())
+            .build();
 
-        UnifiedChatResponse uResp = new UnifiedChatResponse(
-            "resp_2", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0,
-                new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null, null,
-                    List.of(tc), null, null, null),
-                null, "tool_calls", null)),
-            null, null);
+        UnifiedChatResponse uResp = UnifiedChatResponse.builder()
+            .id("resp_2")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .toolCalls(List.of(tc))
+                    .build())
+                .finishReason("tool_calls")
+                .build()))
+            .build();
 
         ToolRemapContext ctx = new ToolRemapContext();
         ctx.putCustom("my_custom", "my_custom", ToolRemapContext.Kind.RAW);
@@ -378,17 +446,28 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldRemapNamespaceFunctionCallInResponse() {
-        UnifiedToolCall tc = new UnifiedToolCall("call_3", "function",
-            new UnifiedFunctionCall("mcp_filesystem_read",
-                new ObjectMapper().createObjectNode().put("path", "/tmp/test")));
+        UnifiedToolCall tc = UnifiedToolCall.builder()
+            .id("call_3")
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("mcp_filesystem_read")
+                .arguments(new ObjectMapper().createObjectNode().put("path", "/tmp/test"))
+                .build())
+            .build();
 
-        UnifiedChatResponse uResp = new UnifiedChatResponse(
-            "resp_3", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0,
-                new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null, null,
-                    List.of(tc), null, null, null),
-                null, "tool_calls", null)),
-            null, null);
+        UnifiedChatResponse uResp = UnifiedChatResponse.builder()
+            .id("resp_3")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .toolCalls(List.of(tc))
+                    .build())
+                .finishReason("tool_calls")
+                .build()))
+            .build();
 
         ToolRemapContext ctx = new ToolRemapContext();
         ctx.putNamespace("mcp_filesystem_read", "read", "mcp__filesystem__", "ns0");
@@ -408,19 +487,30 @@ class ResponsesProtocolAdapterTest {
         ctx.putNamespace("mcp_filesystem_write", "write", "mcp__filesystem__", "ns0");
 
         // LLM 返回短名（flatName 查不到），但 args 含 custom_ns
-        var tc = new UnifiedToolCall("call_1", "function",
-            new UnifiedFunctionCall("read",
-                new ObjectMapper().createObjectNode()
+        var tc = UnifiedToolCall.builder()
+            .id("call_1")
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("read")
+                .arguments(new ObjectMapper().createObjectNode()
                     .put("path", "/etc/hosts")
-                    .put(ProxyConstants.MCP_SERVER_ROUTER_PARAM, "ns0")));
+                    .put(ProxyConstants.MCP_SERVER_ROUTER_PARAM, "ns0"))
+                .build())
+            .build();
 
-        var uResp = new UnifiedChatResponse(
-            "resp_1", "test-model", null, 1715000000L,
-            List.of(new UnifiedChoice(0,
-                new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null, null,
-                    List.of(tc), null, null, null),
-                null, "tool_calls", null)),
-            null, null);
+        var uResp = UnifiedChatResponse.builder()
+            .id("resp_1")
+            .model("test-model")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .toolCalls(List.of(tc))
+                    .build())
+                .finishReason("tool_calls")
+                .build()))
+            .build();
 
         byte[] out = adapter.fromUnifiedResponse(uResp, null, ctx);
         var root = new ObjectMapper().readTree(out);
@@ -487,17 +577,28 @@ class ResponsesProtocolAdapterTest {
 
     @Test
     void shouldPreserveOriginalFunctionCallWhenNoRemap() {
-        UnifiedToolCall tc = new UnifiedToolCall("call_4", "function",
-            new UnifiedFunctionCall("get_weather",
-                new ObjectMapper().createObjectNode().put("city", "Beijing")));
+        UnifiedToolCall tc = UnifiedToolCall.builder()
+            .id("call_4")
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("get_weather")
+                .arguments(new ObjectMapper().createObjectNode().put("city", "Beijing"))
+                .build())
+            .build();
 
-        UnifiedChatResponse uResp = new UnifiedChatResponse(
-            "resp_4", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0,
-                new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null, null,
-                    List.of(tc), null, null, null),
-                null, "tool_calls", null)),
-            null, null);
+        UnifiedChatResponse uResp = UnifiedChatResponse.builder()
+            .id("resp_4")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .toolCalls(List.of(tc))
+                    .build())
+                .finishReason("tool_calls")
+                .build()))
+            .build();
 
         ToolRemapContext ctx = new ToolRemapContext();
 
@@ -517,15 +618,25 @@ class ResponsesProtocolAdapterTest {
 
         var args = new ObjectMapper().createObjectNode()
             .put("input", "*** Begin Patch\n*** Add File: hello.txt\n+Hello\n*** End Patch");
-        UnifiedChatResponse chunk1 = new UnifiedChatResponse(
-            "resp_1", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0, null,
-                new UnifiedDelta("assistant", null,
-                    List.of(new UnifiedToolCall("call_1", "function",
-                        new UnifiedFunctionCall("apply_patch", args))),
-                    null),
-                null, null)),
-            null, null);
+        UnifiedChatResponse chunk1 = UnifiedChatResponse.builder()
+            .id("resp_1")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .delta(UnifiedDelta.builder()
+                    .role("assistant")
+                    .toolCalls(List.of(UnifiedToolCall.builder()
+                        .id("call_1")
+                        .type("function")
+                        .function(UnifiedFunctionCall.builder()
+                            .name("apply_patch")
+                            .arguments(args)
+                            .build())
+                        .build()))
+                    .build())
+                .build()))
+            .build();
 
         List<String> events = adapter.toStreamEvents(chunk1, st);
 
@@ -549,15 +660,25 @@ class ResponsesProtocolAdapterTest {
         ResponsesProtocolAdapter.StreamState st = new ResponsesProtocolAdapter.StreamState(ctx);
 
         var args = new ObjectMapper().createObjectNode().put("path", "/tmp/test");
-        UnifiedChatResponse chunk1 = new UnifiedChatResponse(
-            "resp_2", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0, null,
-                new UnifiedDelta("assistant", null,
-                    List.of(new UnifiedToolCall("call_2", "function",
-                        new UnifiedFunctionCall("mcp_filesystem_read", args))),
-                    null),
-                null, null)),
-            null, null);
+        UnifiedChatResponse chunk1 = UnifiedChatResponse.builder()
+            .id("resp_2")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .delta(UnifiedDelta.builder()
+                    .role("assistant")
+                    .toolCalls(List.of(UnifiedToolCall.builder()
+                        .id("call_2")
+                        .type("function")
+                        .function(UnifiedFunctionCall.builder()
+                            .name("mcp_filesystem_read")
+                            .arguments(args)
+                            .build())
+                        .build()))
+                    .build())
+                .build()))
+            .build();
 
         List<String> events = adapter.toStreamEvents(chunk1, st);
 
@@ -583,15 +704,25 @@ class ResponsesProtocolAdapterTest {
         var args = new ObjectMapper().createObjectNode()
             .put("path", "/x")
             .put(ProxyConstants.MCP_SERVER_ROUTER_PARAM, "ns0");
-        UnifiedChatResponse chunk = new UnifiedChatResponse(
-            "resp_ns", "test-model", null, 1715000000L,
-            List.of(new UnifiedChoice(0, null,
-                new UnifiedDelta("assistant", null,
-                    List.of(new UnifiedToolCall("call_ns", "function",
-                        new UnifiedFunctionCall("read", args))),
-                    null),
-                null, null)),
-            null, null);
+        UnifiedChatResponse chunk = UnifiedChatResponse.builder()
+            .id("resp_ns")
+            .model("test-model")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .delta(UnifiedDelta.builder()
+                    .role("assistant")
+                    .toolCalls(List.of(UnifiedToolCall.builder()
+                        .id("call_ns")
+                        .type("function")
+                        .function(UnifiedFunctionCall.builder()
+                            .name("read")
+                            .arguments(args)
+                            .build())
+                        .build()))
+                    .build())
+                .build()))
+            .build();
 
         List<String> events = adapter.toStreamEvents(chunk, state);
 
@@ -611,17 +742,28 @@ class ResponsesProtocolAdapterTest {
         ctx.putCustom("apply_patch", "apply_patch", ToolRemapContext.Kind.APPLY_PATCH);
 
         // 参数中没有 input 字段
-        UnifiedToolCall tc = new UnifiedToolCall("call_fb", "function",
-            new UnifiedFunctionCall("apply_patch",
-                new ObjectMapper().createObjectNode().put("wrong_field", "value")));
+        UnifiedToolCall tc = UnifiedToolCall.builder()
+            .id("call_fb")
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("apply_patch")
+                .arguments(new ObjectMapper().createObjectNode().put("wrong_field", "value"))
+                .build())
+            .build();
 
-        UnifiedChatResponse uResp = new UnifiedChatResponse(
-            "resp_fb", "gpt-4o", null, 1715000000L,
-            List.of(new UnifiedChoice(0,
-                new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null, null,
-                    List.of(tc), null, null, null),
-                null, "tool_calls", null)),
-            null, null);
+        UnifiedChatResponse uResp = UnifiedChatResponse.builder()
+            .id("resp_fb")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .toolCalls(List.of(tc))
+                    .build())
+                .finishReason("tool_calls")
+                .build()))
+            .build();
 
         byte[] raw = adapter.fromUnifiedResponse(uResp, null, ctx);
         String json = new String(raw, StandardCharsets.UTF_8);
@@ -664,6 +806,99 @@ class ResponsesProtocolAdapterTest {
         assertThat(msg.role()).isEqualTo(UnifiedMessage.Role.TOOL);
         assertThat(msg.toolCallId()).isEqualTo("call_123");
         assertThat(msg.content()).isEqualTo("工具执行结果");
+    }
+
+    // ===== P2-10: 流式截断分类 =====
+
+    @Test
+    void completionEvent_有finishReason时status为completed() {
+        ResponsesProtocolAdapter.StreamState st = new ResponsesProtocolAdapter.StreamState();
+        st.responseId = "resp_ok";
+        st.modelName = "gpt-4o";
+        st.createdAt = 1715000000L;
+        st.hasFinishReason = true;
+
+        String event = adapter.completionEvent(st, null);
+
+        assertThat(event).contains("\"type\":\"response.completed\"");
+        assertThat(event).contains("\"status\":\"completed\"");
+    }
+
+    @Test
+    void completionEvent_有输出无finishReason时status为incomplete() {
+        ResponsesProtocolAdapter.StreamState st = new ResponsesProtocolAdapter.StreamState();
+        st.responseId = "resp_truncated";
+        st.modelName = "gpt-4o";
+        st.createdAt = 1715000000L;
+        st.hasFinishReason = false;
+        st.hasSubstantiveOutput = true;
+
+        String event = adapter.completionEvent(st, null);
+
+        // 仍发 completed 事件,但 response.status=incomplete
+        assertThat(event).contains("\"status\":\"incomplete\"");
+        assertThat(event).contains("\"incomplete_details\"");
+        assertThat(event).contains("\"reason\":\"max_output_tokens\"");
+    }
+
+    @Test
+    void completionEvent_无输出无finishReason时status为failed() {
+        ResponsesProtocolAdapter.StreamState st = new ResponsesProtocolAdapter.StreamState();
+        st.responseId = "resp_failed";
+        st.modelName = "gpt-4o";
+        st.createdAt = 1715000000L;
+        st.hasFinishReason = false;
+        st.hasSubstantiveOutput = false;
+
+        String event = adapter.completionEvent(st, null);
+
+        // 发 response.failed 事件,status=failed
+        assertThat(event).contains("\"type\":\"response.failed\"");
+        assertThat(event).contains("\"status\":\"failed\"");
+        assertThat(event).contains("stream_truncated");
+    }
+
+    @Test
+    void completionEvent_无输出无finishReason时包含错误消息() {
+        ResponsesProtocolAdapter.StreamState st = new ResponsesProtocolAdapter.StreamState();
+        st.responseId = "resp_failed_msg";
+        st.modelName = "gpt-4o";
+        st.createdAt = 1715000000L;
+        st.hasFinishReason = false;
+        st.hasSubstantiveOutput = false;
+
+        String event = adapter.completionEvent(st, null);
+
+        assertThat(event).contains("上游流式响应被截断");
+    }
+
+    @Test
+    void shouldParsePreviousResponseIdToExtensions() {
+        String body = "{\"model\":\"gpt-4o\"," +
+            "\"previous_response_id\":\"resp_abc123\"," +
+            "\"input\":[{\"type\":\"message\",\"role\":\"user\"," +
+            "\"content\":[{\"type\":\"input_text\",\"text\":\"Hi\"}]}]}";
+
+        UnifiedChatRequest req = new ResponsesProtocolAdapter(null)
+            .toUnifiedRequest(body.getBytes(), java.util.Map.of());
+
+        assertThat(req.openai()).isNotNull();
+        assertThat(req.openai().previousResponseId()).isEqualTo("resp_abc123");
+    }
+
+    @Test
+    void shouldParseIncludeArrayToExtensions() {
+        String body = "{\"model\":\"gpt-4o\"," +
+            "\"include\":[\"file_search_call.results\",\"message.output_text.logprobs\"]," +
+            "\"input\":[{\"type\":\"message\",\"role\":\"user\"," +
+            "\"content\":[{\"type\":\"input_text\",\"text\":\"Hi\"}]}]}";
+
+        UnifiedChatRequest req = new ResponsesProtocolAdapter(null)
+            .toUnifiedRequest(body.getBytes(), java.util.Map.of());
+
+        assertThat(req.openai()).isNotNull();
+        assertThat(req.openai().include()).containsExactly(
+            "file_search_call.results", "message.output_text.logprobs");
     }
 
 }

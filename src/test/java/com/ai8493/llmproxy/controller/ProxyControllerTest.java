@@ -61,6 +61,10 @@ class ProxyControllerTest {
             5L,                          // writeTimeout
             5,                           // maxIdleConnections
             60L,                         // keepAliveDuration
+            null,                        // reasoningEffortMode
+            null,                        // reasoningEffortDefault
+            null,                        // thinkingDefaultType
+            null,                        // thinkingDefaultBudget
             "2026-01-01T00:00:00Z"       // updatedAt
         ));
 

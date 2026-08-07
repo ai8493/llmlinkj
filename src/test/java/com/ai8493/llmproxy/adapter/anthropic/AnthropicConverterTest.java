@@ -23,11 +23,17 @@ class AnthropicConverterTest {
 
     @Test
     void request_基础文本转换() {
-        var req = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514",
-            List.of(new UnifiedMessage(UnifiedMessage.Role.USER, "Hello", null, null, null, null, null)),
-            new UnifiedGenerationConfig(null, null, 100, null, null, null, null, null),
-            null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(List.of(UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.USER)
+                .content("Hello")
+                .build()))
+            .config(UnifiedGenerationConfig.builder()
+                .maxOutputTokens(100)
+                .build())
+            .stream(false)
+            .build();
 
         var result = requestConverter.convert(req);
 
@@ -40,14 +46,23 @@ class AnthropicConverterTest {
 
     @Test
     void request_SYSTEM消息独立为顶层system字段() {
-        var req = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514",
-            List.of(
-                new UnifiedMessage(UnifiedMessage.Role.SYSTEM, "You are a helpful assistant.", null, null, null, null, null),
-                new UnifiedMessage(UnifiedMessage.Role.USER, "Hi", null, null, null, null, null)
-            ),
-            new UnifiedGenerationConfig(null, null, 100, null, null, null, null, null),
-            null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(List.of(
+                UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.SYSTEM)
+                    .content("You are a helpful assistant.")
+                    .build(),
+                UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.USER)
+                    .content("Hi")
+                    .build()
+            ))
+            .config(UnifiedGenerationConfig.builder()
+                .maxOutputTokens(100)
+                .build())
+            .stream(false)
+            .build();
 
         var result = requestConverter.convert(req);
 
@@ -61,12 +76,18 @@ class AnthropicConverterTest {
     @Test
     void request_ASSISTANT消息含reasoningContent() {
         // reasoningContent → ThinkingBlockParam（signature="" 绕过 API 必填校验）
-        var req = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514",
-            List.of(new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, "Here is the answer.",
-                null, null, null, null, "Let me think step by step...")),
-            new UnifiedGenerationConfig(null, null, 100, null, null, null, null, null),
-            null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(List.of(UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.ASSISTANT)
+                .content("Here is the answer.")
+                .reasoningContent("Let me think step by step...")
+                .build()))
+            .config(UnifiedGenerationConfig.builder()
+                .maxOutputTokens(100)
+                .build())
+            .stream(false)
+            .build();
 
         var params = requestConverter.convert(req);
         assertThat(params).isNotNull();
@@ -76,14 +97,24 @@ class AnthropicConverterTest {
     @Test
     void request_ASSISTANT消息含toolCalls() throws Exception {
         var args = MAPPER.readTree("{\"location\": \"NYC\"}");
-        var req = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514",
-            List.of(new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null, null,
-                List.of(new UnifiedToolCall("tc1", "function",
-                    new UnifiedFunctionCall("get_weather", args))),
-                null, null, null)),
-            new UnifiedGenerationConfig(null, null, 100, null, null, null, null, null),
-            null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(List.of(UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.ASSISTANT)
+                .toolCalls(List.of(UnifiedToolCall.builder()
+                    .id("tc1")
+                    .type("function")
+                    .function(UnifiedFunctionCall.builder()
+                        .name("get_weather")
+                        .arguments(args)
+                        .build())
+                    .build()))
+                .build()))
+            .config(UnifiedGenerationConfig.builder()
+                .maxOutputTokens(100)
+                .build())
+            .stream(false)
+            .build();
 
         var result = requestConverter.convert(req);
 
@@ -99,12 +130,18 @@ class AnthropicConverterTest {
 
     @Test
     void request_TOOL消息() {
-        var req = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514",
-            List.of(new UnifiedMessage(UnifiedMessage.Role.TOOL, "Temperature: 72F",
-                null, null, "tc1", null, null)),
-            new UnifiedGenerationConfig(null, null, 100, null, null, null, null, null),
-            null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(List.of(UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.TOOL)
+                .content("Temperature: 72F")
+                .toolCallId("tc1")
+                .build()))
+            .config(UnifiedGenerationConfig.builder()
+                .maxOutputTokens(100)
+                .build())
+            .stream(false)
+            .build();
 
         var result = requestConverter.convert(req);
 
@@ -119,26 +156,64 @@ class AnthropicConverterTest {
 
     @Test
     void request_ToolChoice映射() {
-        var hiMsg = List.of(new UnifiedMessage(UnifiedMessage.Role.USER, "hi", null, null, null, null, null));
-        var defaultConfig = new UnifiedGenerationConfig(null, null, 100, null, null, null, null, null);
+        var hiMsg = List.of(UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.USER)
+            .content("hi")
+            .build());
+        var defaultConfig = UnifiedGenerationConfig.builder()
+            .maxOutputTokens(100)
+            .build();
+        var emptySchema = MAPPER.createObjectNode();
+        emptySchema.put("$schema", "https://json-schema.org/draft/2020-12/schema");
+        emptySchema.put("type", "object");
+        emptySchema.putArray("required");
+        emptySchema.putObject("additionalProperties").put("type", "string");
+        var tools = List.of(UnifiedTool.builder()
+            .type("function")
+            .function(UnifiedFunctionDefinition.builder()
+                .name("get_weather")
+                .description("获取天气")
+                .parameters(emptySchema)
+                .build())
+            .build());
 
         // None
-        var reqNone = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514", hiMsg, defaultConfig, null, new UnifiedToolChoice.None(), false);
+        var reqNone = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(hiMsg)
+            .config(defaultConfig)
+            .tools(tools)
+            .toolChoice(UnifiedToolChoice.None.builder().build())
+            .stream(false)
+            .build();
         var resultNone = requestConverter.convert(reqNone);
         assertThat(resultNone.toolChoice()).isPresent();
         assertThat(resultNone.toolChoice().get().isNone()).isTrue();
 
         // Auto
-        var reqAuto = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514", hiMsg, defaultConfig, null, new UnifiedToolChoice.Auto(), false);
+        var reqAuto = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(hiMsg)
+            .config(defaultConfig)
+            .tools(tools)
+            .toolChoice(UnifiedToolChoice.Auto.builder().build())
+            .stream(false)
+            .build();
         var resultAuto = requestConverter.convert(reqAuto);
         assertThat(resultAuto.toolChoice()).isPresent();
         assertThat(resultAuto.toolChoice().get().isAuto()).isTrue();
 
         // Required
-        var reqTool = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514", hiMsg, defaultConfig, null, new UnifiedToolChoice.Required("get_weather"), false);
+        var reqTool = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(hiMsg)
+            .config(defaultConfig)
+            .tools(tools)
+            .toolChoice(UnifiedToolChoice.Required.builder()
+                .functionName("get_weather")
+                .build())
+            .stream(false)
+            .build();
         var resultTool = requestConverter.convert(reqTool);
         assertThat(resultTool.toolChoice()).isPresent();
         assertThat(resultTool.toolChoice().get().isTool()).isTrue();
@@ -147,11 +222,21 @@ class AnthropicConverterTest {
 
     @Test
     void request_生成参数() {
-        var hiMsg = List.of(new UnifiedMessage(UnifiedMessage.Role.USER, "hi", null, null, null, null, null));
-        var req = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514", hiMsg,
-            new UnifiedGenerationConfig(0.7, 0.9, 200, List.of("\n\n", "stop"), null, null, null, null),
-            null, null, false);
+        var hiMsg = List.of(UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.USER)
+            .content("hi")
+            .build());
+        var req = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(hiMsg)
+            .config(UnifiedGenerationConfig.builder()
+                .temperature(0.7)
+                .topP(0.9)
+                .maxOutputTokens(200)
+                .stopSequences(List.of("\n\n", "stop"))
+                .build())
+            .stream(false)
+            .build();
 
         var result = requestConverter.convert(req);
 
@@ -163,14 +248,23 @@ class AnthropicConverterTest {
 
     @Test
     void request_空消息跳过() {
-        var req = new UnifiedChatRequest(
-            "claude-sonnet-4-20250514",
-            List.of(
-                new UnifiedMessage(UnifiedMessage.Role.USER, "", null, null, null, null, null),
-                new UnifiedMessage(UnifiedMessage.Role.USER, "valid", null, null, null, null, null)
-            ),
-            new UnifiedGenerationConfig(null, null, 100, null, null, null, null, null),
-            null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(List.of(
+                UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.USER)
+                    .content("")
+                    .build(),
+                UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.USER)
+                    .content("valid")
+                    .build()
+            ))
+            .config(UnifiedGenerationConfig.builder()
+                .maxOutputTokens(100)
+                .build())
+            .stream(false)
+            .build();
 
         var result = requestConverter.convert(req);
 
@@ -194,7 +288,7 @@ class AnthropicConverterTest {
         assertThat(result.model()).isEqualTo("claude-sonnet-4-20250514");
         assertThat(result.choices()).hasSize(1);
         assertThat(result.choices().get(0).message().content()).isEqualTo("Hello world");
-        assertThat(result.choices().get(0).finishReason()).isEqualTo("stop");
+        assertThat(result.choices().get(0).finishReason()).isEqualTo("end_turn");
     }
 
     @Test
@@ -244,11 +338,11 @@ class AnthropicConverterTest {
 
         // END_TURN → stop
         var msgEndTurn = fullMessage("msg_4", textContent, StopReason.END_TURN, usage(10, 20));
-        assertThat(responseConverter.convert(msgEndTurn).choices().get(0).finishReason()).isEqualTo("stop");
+        assertThat(responseConverter.convert(msgEndTurn).choices().get(0).finishReason()).isEqualTo("end_turn");
 
         // MAX_TOKENS → length
         var msgMaxTokens = fullMessage("msg_5", textContent, StopReason.MAX_TOKENS, usage(10, 20));
-        assertThat(responseConverter.convert(msgMaxTokens).choices().get(0).finishReason()).isEqualTo("length");
+        assertThat(responseConverter.convert(msgMaxTokens).choices().get(0).finishReason()).isEqualTo("max_tokens");
     }
 
     @Test
@@ -322,6 +416,34 @@ class AnthropicConverterTest {
 
         assertThat(deltaResult.choices()).hasSize(1);
         assertThat(deltaResult.choices().get(0).delta().reasoningContent()).isEqualTo("step by step...");
+    }
+
+    @Test
+    void streaming_signatureDelta透传到thinkingSignature() {
+        var converter = new AnthropicStreamingResponseConverter();
+        setupMessageStart(converter, "msg_sig");
+
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockStart(
+            RawContentBlockStartEvent.builder()
+                .index(0)
+                .contentBlock(thinkingBlock("", ""))
+                .build()));
+
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockDelta(
+            RawContentBlockDeltaEvent.builder()
+                .index(0)
+                .thinkingDelta("思考增量")
+                .build()));
+
+        var sigResult = converter.convertEvent(RawMessageStreamEvent.ofContentBlockDelta(
+            RawContentBlockDeltaEvent.builder()
+                .index(0)
+                .signatureDelta("sig-abc")
+                .build()));
+
+        // signature delta 应产出含 thinkingSignature 的 chunk(支持多轮续接)
+        assertThat(sigResult.choices()).isNotEmpty();
+        assertThat(sigResult.choices().get(0).delta().thinkingSignature()).isEqualTo("sig-abc");
     }
 
     @Test
@@ -593,6 +715,154 @@ class AnthropicConverterTest {
             .isEqualTo("*** Begin Patch\n+hello\n*** End Patch");
     }
 
+    // ===== P2-10: 流式截断分类 =====
+
+    @Test
+    void streaming_无stopReason时isStreamCompleted为false() {
+        var converter = new AnthropicStreamingResponseConverter();
+        setupMessageStart(converter, "msg_truncated");
+
+        // 发送 text delta 但不发 messageDelta(无 stopReason)
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockStart(
+            RawContentBlockStartEvent.builder()
+                .index(0)
+                .contentBlock(textBlock(""))
+                .build()));
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockDelta(
+            RawContentBlockDeltaEvent.builder()
+                .index(0).textDelta("部分内容").build()));
+
+        assertThat(converter.isStreamCompleted()).isFalse();
+        assertThat(converter.hasSubstantiveOutput()).isTrue();
+    }
+
+    @Test
+    void streaming_收到stopReason后isStreamCompleted为true() {
+        var converter = new AnthropicStreamingResponseConverter();
+        setupMessageStart(converter, "msg_normal");
+
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockStart(
+            RawContentBlockStartEvent.builder()
+                .index(0)
+                .contentBlock(textBlock(""))
+                .build()));
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockDelta(
+            RawContentBlockDeltaEvent.builder()
+                .index(0).textDelta("hello").build()));
+        converter.convertEvent(RawMessageStreamEvent.ofMessageDelta(
+            RawMessageDeltaEvent.builder()
+                .delta(RawMessageDeltaEvent.Delta.builder()
+                    .stopReason(StopReason.END_TURN)
+                    .stopSequence("")
+                    .stopDetails(RefusalStopDetails.builder()
+                        .category(RefusalStopDetails.Category.CYBER)
+                        .explanation("")
+                        .build())
+                    .build())
+                .usage(MessageDeltaUsage.builder()
+                    .inputTokens(10L)
+                    .outputTokens(20)
+                    .cacheCreationInputTokens(0L)
+                    .cacheReadInputTokens(0L)
+                    .serverToolUse(serverToolUsage())
+                    .build())
+                .build()));
+
+        assertThat(converter.isStreamCompleted()).isTrue();
+    }
+
+    @Test
+    void streaming_thinkingDelta标记hasSubstantiveOutput() {
+        var converter = new AnthropicStreamingResponseConverter();
+        setupMessageStart(converter, "msg_thinking");
+
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockStart(
+            RawContentBlockStartEvent.builder()
+                .index(0)
+                .contentBlock(thinkingBlock("", "sig"))
+                .build()));
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockDelta(
+            RawContentBlockDeltaEvent.builder()
+                .index(0).thinkingDelta("推理中").build()));
+
+        assertThat(converter.hasSubstantiveOutput()).isTrue();
+    }
+
+    @Test
+    void streaming_toolUseBlockStart标记hasSubstantiveOutput() throws Exception {
+        var converter = new AnthropicStreamingResponseConverter();
+        setupMessageStart(converter, "msg_tool");
+
+        converter.convertEvent(RawMessageStreamEvent.ofContentBlockStart(
+            RawContentBlockStartEvent.builder()
+                .index(0)
+                .contentBlock(ToolUseBlock.builder()
+                    .id("tu_1")
+                    .name("get_weather")
+                    .input(JsonValue.fromJsonNode(MAPPER.readTree("{}")))
+                    .caller(DirectCaller.builder().build())
+                    .build())
+                .build()));
+
+        assertThat(converter.hasSubstantiveOutput()).isTrue();
+    }
+
+    @Test
+    void streaming_无任何delta时hasSubstantiveOutput为false() {
+        var converter = new AnthropicStreamingResponseConverter();
+        setupMessageStart(converter, "msg_empty");
+
+        // 仅 messageStart,无任何 content/reasoning/toolCalls
+        assertThat(converter.hasSubstantiveOutput()).isFalse();
+        assertThat(converter.isStreamCompleted()).isFalse();
+    }
+
+    @Test
+    void streaming_synthesizeIncompleteChunk返回lengthFinishReason() {
+        var converter = new AnthropicStreamingResponseConverter();
+        setupMessageStart(converter, "msg_synth");
+
+        UnifiedChatResponse synth = converter.synthesizeIncompleteChunk();
+
+        assertThat(synth.choices()).hasSize(1);
+        assertThat(synth.choices().get(0).finishReason()).isEqualTo("length");
+        assertThat(synth.object()).isEqualTo("chat.completion.chunk");
+    }
+
+    @Test
+    void streaming_messageDelta的cacheRead和cacheCreation并存() {
+        var converter = new AnthropicStreamingResponseConverter();
+        setupMessageStart(converter, "msg_cache");
+
+        // messageDelta 同时含 cache_read 和 cache_creation
+        converter.convertEvent(RawMessageStreamEvent.ofMessageDelta(
+            RawMessageDeltaEvent.builder()
+                .delta(RawMessageDeltaEvent.Delta.builder()
+                    .stopReason(StopReason.END_TURN)
+                    .stopSequence("")
+                    .stopDetails(RefusalStopDetails.builder()
+                        .category(RefusalStopDetails.Category.CYBER)
+                        .explanation("")
+                        .build())
+                    .build())
+                .usage(MessageDeltaUsage.builder()
+                    .inputTokens(100L)
+                    .outputTokens(50)
+                    .cacheReadInputTokens(30L)
+                    .cacheCreationInputTokens(20L)
+                    .serverToolUse(serverToolUsage())
+                    .build())
+                .build()));
+
+        // messageStop 组装最终 chunk
+        var result = converter.convertEvent(RawMessageStreamEvent.ofMessageStop(
+            RawMessageStopEvent.builder().build()));
+        assertThat(result.usage()).isNotNull();
+        // 两个桶应并存,非互斥
+        assertThat(result.usage().cachedTokens()).isEqualTo(30);
+        assertThat(result.usage().cacheCreationTokens()).isEqualTo(20);
+    }
+
     // ===== 辅助方法 =====
 
     /** 构建包含所有必填字段的完整 Message */
@@ -672,26 +942,54 @@ class AnthropicConverterTest {
         // 模拟真实场景（源于 MiniMax anthropic 端点上曾报的错）：
         // "duplicate tool_call id: call_function_md5tlih0m78d_1"
         // 多轮对话中同一 call_id 在 history 中重复出现
-        var tc1 = new UnifiedToolCall("call_function_dup", "function",
-            new UnifiedFunctionCall("shell_command",
-                MAPPER.createObjectNode().put("command", "ls")));
-        var tc2 = new UnifiedToolCall("call_function_dup", "function",
-            new UnifiedFunctionCall("shell_command",
-                MAPPER.createObjectNode().put("command", "pwd")));
+        var tc1 = UnifiedToolCall.builder()
+            .id("call_function_dup")
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("shell_command")
+                .arguments(MAPPER.createObjectNode().put("command", "ls"))
+                .build())
+            .build();
+        var tc2 = UnifiedToolCall.builder()
+            .id("call_function_dup")
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("shell_command")
+                .arguments(MAPPER.createObjectNode().put("command", "pwd"))
+                .build())
+            .build();
 
-        var msg1 = new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, "Running ls...",
-            null, List.of(tc1), null, null, null);
-        var msg2 = new UnifiedMessage(UnifiedMessage.Role.TOOL, "file1 file2",
-            null, null, "call_function_dup", "shell_command", null);
-        var msg3 = new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, "Running pwd...",
-            null, List.of(tc2), null, null, null);
-        var msg4 = new UnifiedMessage(UnifiedMessage.Role.TOOL, "/home/user",
-            null, null, "call_function_dup", "shell_command", null);
+        var msg1 = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.ASSISTANT)
+            .content("Running ls...")
+            .toolCalls(List.of(tc1))
+            .build();
+        var msg2 = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.TOOL)
+            .content("file1 file2")
+            .toolCallId("call_function_dup")
+            .name("shell_command")
+            .build();
+        var msg3 = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.ASSISTANT)
+            .content("Running pwd...")
+            .toolCalls(List.of(tc2))
+            .build();
+        var msg4 = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.TOOL)
+            .content("/home/user")
+            .toolCallId("call_function_dup")
+            .name("shell_command")
+            .build();
 
-        var req = new UnifiedChatRequest("claude-sonnet-4-20250514",
-            List.of(msg1, msg2, msg3, msg4),
-            new UnifiedGenerationConfig(null, null, 100, null, null, null, null, null),
-            null, null, false);
+        var req = UnifiedChatRequest.builder()
+            .model("claude-sonnet-4-20250514")
+            .messages(List.of(msg1, msg2, msg3, msg4))
+            .config(UnifiedGenerationConfig.builder()
+                .maxOutputTokens(100)
+                .build())
+            .stream(false)
+            .build();
 
         // 不应抛出异常 — converter 内部 uniquify 了重复 ID
         var params = requestConverter.convert(req);
@@ -708,7 +1006,7 @@ class AnthropicConverterTest {
             Path.of("src/test/resources/fixtures/real-duplicate-toolcall-request.json"));
 
         // 1) Responses Protocol Adapter → IR
-        var protocolAdapter = new com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter();
+        var protocolAdapter = new com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter(null);
         UnifiedChatRequest ir = protocolAdapter.toUnifiedRequest(rawRequest, null);
 
         // ====== IR 层验证 ======
@@ -752,26 +1050,51 @@ class AnthropicConverterTest {
         // 加载真实报文
         byte[] rawRequest = Files.readAllBytes(
             Path.of("src/test/resources/fixtures/real-duplicate-toolcall-request.json"));
-        var protocolAdapter = new com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter();
+        var protocolAdapter = new com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter(null);
         UnifiedChatRequest ir = protocolAdapter.toUnifiedRequest(rawRequest, null);
 
         // 模拟多轮场景：在消息列表头部插入两条含相同 call_id 的 assistant+tool 消息
         var dupId = "call_function_md5tlih0m78d_1"; // 日志中真实出现的重复 ID
         var args = MAPPER.createObjectNode().put("command", "ls -la");
-        var toolCall = new UnifiedToolCall(dupId, "function",
-            new UnifiedFunctionCall("shell_command", args));
-        var assistantMsg = new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, "Running ls...",
-            null, List.of(toolCall), null, null, null);
-        var toolMsg = new UnifiedMessage(UnifiedMessage.Role.TOOL, "file1 file2 dir3",
-            null, null, dupId, "shell_command", null);
+        var toolCall = UnifiedToolCall.builder()
+            .id(dupId)
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("shell_command")
+                .arguments(args)
+                .build())
+            .build();
+        var assistantMsg = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.ASSISTANT)
+            .content("Running ls...")
+            .toolCalls(List.of(toolCall))
+            .build();
+        var toolMsg = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.TOOL)
+            .content("file1 file2 dir3")
+            .toolCallId(dupId)
+            .name("shell_command")
+            .build();
         // 再插入一个同样 ID 的 function_call（模拟重复）
-        var toolCall2 = new UnifiedToolCall(dupId, "function", // 相同 ID！
-            new UnifiedFunctionCall("shell_command",
-                MAPPER.createObjectNode().put("command", "pwd")));
-        var assistantMsg2 = new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, "Running pwd...",
-            null, List.of(toolCall2), null, null, null);
-        var toolMsg2 = new UnifiedMessage(UnifiedMessage.Role.TOOL, "/home/user",
-            null, null, dupId, "shell_command", null);
+        var toolCall2 = UnifiedToolCall.builder()
+            .id(dupId)
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name("shell_command")
+                .arguments(MAPPER.createObjectNode().put("command", "pwd"))
+                .build())
+            .build();
+        var assistantMsg2 = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.ASSISTANT)
+            .content("Running pwd...")
+            .toolCalls(List.of(toolCall2))
+            .build();
+        var toolMsg2 = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.TOOL)
+            .content("/home/user")
+            .toolCallId(dupId)
+            .name("shell_command")
+            .build();
 
         // 在原始 SYSTEM 消息之后插入历史对话
         var messages = new java.util.ArrayList<>(ir.messages());
@@ -780,8 +1103,14 @@ class AnthropicConverterTest {
         messages.add(3, assistantMsg2);
         messages.add(4, toolMsg2);
 
-        var modifiedIr = new UnifiedChatRequest(ir.model(), messages,
-            ir.config(), ir.tools(), ir.toolChoice(), ir.stream());
+        var modifiedIr = UnifiedChatRequest.builder()
+            .model(ir.model())
+            .messages(messages)
+            .config(ir.config())
+            .tools(ir.tools())
+            .toolChoice(ir.toolChoice())
+            .stream(ir.stream())
+            .build();
 
         // 转换不应抛异常
         var params = requestConverter.convert(modifiedIr);
@@ -803,8 +1132,14 @@ class AnthropicConverterTest {
         var protocolAdapter = new com.ai8493.llmproxy.adapter.gemini.GeminiProtocolAdapter();
         UnifiedChatRequest ir = protocolAdapter.toUnifiedRequest(rawRequest, null);
         // Gemini 请求体中可能不含 model 字段（model 来自 URL path），手动补上避免 NPE
-        ir = new UnifiedChatRequest("MiniMax-M2.7", ir.messages(), ir.config(),
-            ir.tools(), ir.toolChoice(), ir.stream());
+        ir = UnifiedChatRequest.builder()
+            .model("MiniMax-M2.7")
+            .messages(ir.messages())
+            .config(ir.config())
+            .tools(ir.tools())
+            .toolChoice(ir.toolChoice())
+            .stream(ir.stream())
+            .build();
 
         // ====== IR 层验证 ======
         assertThat(ir.messages()).isNotEmpty();
@@ -843,7 +1178,7 @@ class AnthropicConverterTest {
             Path.of("src/test/resources/fixtures/current-empty-response.json"));
 
         // 1) Responses Protocol Adapter → IR
-        var protocolAdapter = new com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter();
+        var protocolAdapter = new com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter(null);
         UnifiedChatRequest ir = protocolAdapter.toUnifiedRequest(rawRequest, null);
 
         assertThat(ir.model()).isEqualTo("gpt-5.5");
@@ -885,8 +1220,14 @@ class AnthropicConverterTest {
 
         var protocolAdapter = new com.ai8493.llmproxy.adapter.gemini.GeminiProtocolAdapter();
         UnifiedChatRequest ir = protocolAdapter.toUnifiedRequest(rawRequest, null);
-        ir = new UnifiedChatRequest("MiniMax-M2.7", ir.messages(), ir.config(),
-            ir.tools(), ir.toolChoice(), ir.stream());
+        ir = UnifiedChatRequest.builder()
+            .model("MiniMax-M2.7")
+            .messages(ir.messages())
+            .config(ir.config())
+            .tools(ir.tools())
+            .toolChoice(ir.toolChoice())
+            .stream(ir.stream())
+            .build();
 
         // 验证 tools 非空
         assertThat(ir.tools()).as("IR tools 不应为空").isNotNull().isNotEmpty();
@@ -936,7 +1277,7 @@ class AnthropicConverterTest {
         byte[] rawRequest = Files.readAllBytes(
             Path.of("src/test/resources/fixtures/error-invalid-tool-call-id.json"));
 
-        var protocolAdapter = new com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter();
+        var protocolAdapter = new com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter(null);
         UnifiedChatRequest ir = protocolAdapter.toUnifiedRequest(rawRequest, null);
 
         // 验证 IR 中所有 toolCallId / toolCall id 非空

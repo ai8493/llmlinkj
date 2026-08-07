@@ -16,7 +16,7 @@ class BackendClientFactoryTest {
             "openai", "sk-test-key", "https://api.deepseek.com",
             "deepseek-chat", null,
             Duration.ofSeconds(10), Duration.ofSeconds(120), Duration.ofSeconds(60),
-            null
+            null, null
         );
 
         OpenAIClient client = BackendClientFactory.createOpenAiClient(config);

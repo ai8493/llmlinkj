@@ -24,18 +24,21 @@ class OpenAiBackendAdapterTest {
             "openai", "sk-test", "http://localhost:8090/v1",
             "gpt-4", null,
             Duration.ofSeconds(5), Duration.ofSeconds(10), Duration.ofSeconds(5),
-            new BackendConfig.PoolConfig(5, Duration.ofMinutes(1))
+            new BackendConfig.PoolConfig(5, Duration.ofMinutes(1)),
+            null
         );
         adapter.init(config);
     }
 
     private UnifiedChatRequest makeRequest(String model, String userContent) {
-        return new UnifiedChatRequest(
-            model,
-            List.of(new UnifiedMessage(UnifiedMessage.Role.USER, userContent,
-                null, null, null, null, null)),
-            null, null, null, false
-        );
+        return UnifiedChatRequest.builder()
+            .model(model)
+            .messages(List.of(UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.USER)
+                .content(userContent)
+                .build()))
+            .stream(false)
+            .build();
     }
 
     @Test
@@ -122,10 +125,11 @@ class OpenAiBackendAdapterTest {
                 .withBody(sseBody)));
 
         var geminiAdapter = new com.ai8493.llmproxy.adapter.gemini.GeminiProtocolAdapter();
+        var ctx = new com.ai8493.llmproxy.adapter.gemini.GeminiRequestContext("test");
         List<String> geminiChunks = new java.util.ArrayList<>();
 
         adapter.stream(makeRequest("deepseek-v4-flash", "java -version"))
-            .map(geminiAdapter::fromUnifiedStreamChunk)
+            .map(ir -> geminiAdapter.fromUnifiedStreamChunk(ir, ctx))
             .doOnNext(geminiChunks::add)
             .blockLast();
 

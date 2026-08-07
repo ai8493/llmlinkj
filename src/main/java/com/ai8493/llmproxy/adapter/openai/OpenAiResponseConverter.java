@@ -25,31 +25,29 @@ public class OpenAiResponseConverter {
             .map(this::toUnifiedChoice)
             .toList();
 
-        return new UnifiedChatResponse(
-            sdkResp.id(),
-            sdkResp.model(),
-            "chat.completion",
-            sdkResp.created(),
-            choices,
-            usage,
-            sdkResp.systemFingerprint().orElse(null)
-        );
+        return UnifiedChatResponse.builder()
+            .id(sdkResp.id())
+            .model(sdkResp.model())
+            .object("chat.completion")
+            .created(sdkResp.created())
+            .choices(choices)
+            .usage(usage)
+            .systemFingerprint(sdkResp.systemFingerprint().orElse(null))
+            .build();
     }
 
     private UnifiedChoice toUnifiedChoice(ChatCompletion.Choice c) {
-        UnifiedDelta delta = null; // 非流式响应无 delta
         JsonNode logprobs = null;
         if (c.logprobs().isPresent()) {
             try { logprobs = MAPPER.valueToTree(c.logprobs().get()); }
             catch (Exception e) { /* 序列化失败则丢弃 */ }
         }
-        return new UnifiedChoice(
-            (int) c.index(),
-            toUnifiedMessage(c.message()),
-            delta,
-            c.finishReason().asString(),
-            logprobs
-        );
+        return UnifiedChoice.builder()
+            .index((int) c.index())
+            .message(toUnifiedMessage(c.message()))
+            .finishReason(c.finishReason().asString())
+            .logprobs(logprobs)
+            .build();
     }
 
     private UnifiedMessage toUnifiedMessage(ChatCompletionMessage msg) {
@@ -62,6 +60,18 @@ public class OpenAiResponseConverter {
             }
         }
 
+        String content = msg.content().orElse(null);
+
+        // 后端原生 reasoning_content 优先;否则尝试从 content 中拆分 <think>...</think> 块
+        // 覆盖 MiniMax 等把 reasoning 塞进 content 标签的上游
+        if (reasoningContent == null && content != null) {
+            String[] split = InlineThinkSplitter.splitLeadingThinkBlock(content);
+            if (split != null) {
+                reasoningContent = split[0].isEmpty() ? null : split[0];
+                content = split[1].isEmpty() ? null : split[1];
+            }
+        }
+
         List<UnifiedToolCall> toolCalls = null;
         if (msg.toolCalls().isPresent()) {
             toolCalls = msg.toolCalls().get().stream()
@@ -69,15 +79,32 @@ public class OpenAiResponseConverter {
                 .toList();
         }
 
-        return new UnifiedMessage(
-            UnifiedMessage.Role.ASSISTANT,
-            msg.content().orElse(null),
-            null,  // parts
-            toolCalls,
-            null,  // toolCallId
-            null,  // name
-            reasoningContent  // reasoningContent（从 _additionalProperties 提取）
-        );
+        // refusal(SDK 原生字段)
+        String refusal = msg.refusal().orElse(null);
+
+        // audio/annotations(从 _additionalProperties 提取)
+        JsonNode audio = null;
+        JsonNode annotations = null;
+        if (msg._additionalProperties() != null) {
+            var audioVal = msg._additionalProperties().get("audio");
+            if (audioVal != null) {
+                try { audio = audioVal.convert(JsonNode.class); } catch (Exception __) {}
+            }
+            var annVal = msg._additionalProperties().get("annotations");
+            if (annVal != null) {
+                try { annotations = annVal.convert(JsonNode.class); } catch (Exception __) {}
+            }
+        }
+
+        return UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.ASSISTANT)
+            .content(content)
+            .toolCalls(toolCalls)
+            .reasoningContent(reasoningContent)
+            .refusal(refusal)
+            .audio(audio)
+            .annotations(annotations)
+            .build();
     }
 
     private UnifiedToolCall toUnifiedToolCall(ChatCompletionMessageToolCall tc) {
@@ -92,18 +119,23 @@ public class OpenAiResponseConverter {
             } catch (Exception e) {
                 log.warn("tool_call arguments JSON 解析失败: id={}", fnTc.id(), e);
             }
-            return new UnifiedToolCall(
-                fnTc.id(),
-                "function",
-                new UnifiedFunctionCall(fnTc.function().name(), args)
-            );
+            return UnifiedToolCall.builder()
+                .id(fnTc.id())
+                .type("function")
+                .function(UnifiedFunctionCall.builder()
+                    .name(fnTc.function().name())
+                    .arguments(args)
+                    .build())
+                .build();
         }
         // 兜底：未知类型的 tool call
-        return new UnifiedToolCall(
-            "unknown",
-            "unknown",
-            new UnifiedFunctionCall("unknown", null)
-        );
+        return UnifiedToolCall.builder()
+            .id("unknown")
+            .type("unknown")
+            .function(UnifiedFunctionCall.builder()
+                .name("unknown")
+                .build())
+            .build();
     }
 
     private UnifiedUsage toUnifiedUsage(CompletionUsage u) {
@@ -115,12 +147,15 @@ public class OpenAiResponseConverter {
         if (u.completionTokensDetails().isPresent()) {
             reasoning = u.completionTokensDetails().get().reasoningTokens().orElse(0L).intValue();
         }
-        return new UnifiedUsage(
-            u._promptTokens().asKnown().map(Number::intValue).orElse(0),
-            u._completionTokens().asKnown().map(Number::intValue).orElse(0),
-            u._totalTokens().asKnown().map(Number::intValue).orElse(0),
-            cached,
-            reasoning
-        );
+        // 计费恒等式: IR.promptTokens + IR.cachedTokens + IR.cacheCreationTokens == 原 promptTokens
+        // OpenAI 后端不区分 cacheCreation,所以 cacheCreationTokens=0;promptTokens 扣减 cachedTokens
+        int rawPromptTokens = u._promptTokens().asKnown().map(Number::intValue).orElse(0);
+        return UnifiedUsage.builder()
+            .promptTokens(Math.max(0, rawPromptTokens - cached))
+            .completionTokens(u._completionTokens().asKnown().map(Number::intValue).orElse(0))
+            .totalTokens(u._totalTokens().asKnown().map(Number::intValue).orElse(0))
+            .cachedTokens(cached)
+            .reasoningTokens(reasoning)
+            .build();
     }
 }

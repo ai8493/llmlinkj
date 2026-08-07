@@ -85,6 +85,9 @@ public class ToolMapper {
                 .mode(FunctionCallingConfigMode.Known.ANY)
                 .allowedFunctionNames(List.of(r.functionName()))
                 .build();
+        } else if (toolChoice instanceof UnifiedToolChoice.Any) {
+            config = FunctionCallingConfig.builder()
+                .mode(FunctionCallingConfigMode.Known.ANY).build();
         } else {
             config = FunctionCallingConfig.builder()
                 .mode(FunctionCallingConfigMode.Known.AUTO).build();
@@ -114,8 +117,14 @@ public class ToolMapper {
                 String desc = decl.has("description") ? decl.get("description").asText() : null;
                 JsonNode params = decl.has("parameters") ? decl.get("parameters")
                     : decl.has("parametersJsonSchema") ? decl.get("parametersJsonSchema") : null;
-                result.add(new UnifiedTool("function",
-                    new UnifiedFunctionDefinition(name, desc, params)));
+                result.add(UnifiedTool.builder()
+                        .type("function")
+                        .function(UnifiedFunctionDefinition.builder()
+                                .name(name)
+                                .description(desc)
+                                .parameters(params)
+                                .build())
+                        .build());
             }
         }
         return result.isEmpty() ? null : result;
@@ -129,11 +138,14 @@ public class ToolMapper {
             tool.functionDeclarations().ifPresent(decls -> {
                 for (var decl : decls) {
                     JsonNode params = decl.parameters().map(this::schemaToJson).orElse(null);
-                    result.add(new UnifiedTool("function",
-                        new UnifiedFunctionDefinition(
-                            decl.name().orElse(""),
-                            decl.description().orElse(null),
-                            params)));
+                    result.add(UnifiedTool.builder()
+                            .type("function")
+                            .function(UnifiedFunctionDefinition.builder()
+                                    .name(decl.name().orElse(""))
+                                    .description(decl.description().orElse(null))
+                                    .parameters(params)
+                                    .build())
+                            .build());
                 }
             });
         }
@@ -146,16 +158,18 @@ public class ToolMapper {
         return toolConfig.functionCallingConfig()
             .map(fcc -> {
                 var mode = fcc.mode().orElse(null);
-                if (mode == null) return new UnifiedToolChoice.Auto();
+                if (mode == null) return UnifiedToolChoice.Auto.builder().build();
                 return switch (mode.toString()) {
-                    case "NONE" -> new UnifiedToolChoice.None();
+                    case "NONE" -> UnifiedToolChoice.None.builder().build();
                     case "ANY" -> {
                         var names = fcc.allowedFunctionNames().orElse(List.of());
                         yield names.isEmpty()
-                            ? new UnifiedToolChoice.Auto()
-                            : new UnifiedToolChoice.Required(names.get(0));
+                            ? UnifiedToolChoice.Auto.builder().build()
+                            : UnifiedToolChoice.Required.builder()
+                                .functionName(names.get(0))
+                                .build();
                     }
-                    default -> new UnifiedToolChoice.Auto();
+                    default -> UnifiedToolChoice.Auto.builder().build();
                 };
             })
             .orElse(null);

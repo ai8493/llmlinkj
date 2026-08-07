@@ -1,42 +1,45 @@
 # LLMLinkJ
 
-大模型协议互转代理——同时对外暴露 OpenAI Chat、OpenAI Responses、Gemini 三套原生端点，对内适配多种后端（Gemini、OpenAI、Anthropic 等）。通过归一化中间表示（IR）解耦客户端协议与后端协议，实现任意客户端协议到任意后端的互转。配置由 SQLite 持久化，通过 `/admin` 管理 API 在线维护，无需改 yml 重启。
+大模型协议互转代理——同时对外暴露 OpenAI Chat、OpenAI Responses、Gemini、Anthropic 四套原生端点，对内适配多种后端（Gemini、OpenAI、OpenAI Responses、Anthropic 等）。通过归一化中间表示（IR）解耦客户端协议与后端协议，实现任意客户端协议到任意后端的互转。配置由 SQLite 持久化，通过 `/admin` 管理 API 在线维护，无需改 yml 重启。
 
 ## 已实现协议转换
 
-通过 IR 解耦，任意入站协议可转任意后端协议（9 条路径，✅ 表示已实现）：
+通过 IR 解耦，任意入站协议可转任意后端协议（4 入站 × 4 后端 = 16 条路径，✅ 表示已实现）：
 
-| 入站 ＼ 后端 | OpenAI Chat | Anthropic |
-|---------------|--------|-----------|
-| OpenAI Chat        |        | ✅ |
-| OpenAI Responses   | ✅      | ✅ |
-| Gemini             | ✅      | ✅ |
+| 入站 ＼ 后端 | Gemini | OpenAI Chat | OpenAI Responses | Anthropic |
+|---------------|--------|-------------|------------------|-----------|
+| OpenAI Chat        | ✅ | ✅ | ✅ | ✅ |
+| OpenAI Responses   | ✅ | ✅ | ✅ | ✅ |
+| Gemini             | ✅ | ✅ | ✅ | ✅ |
+| Anthropic          | ✅ | ✅ | ✅ | ✅ |
 
-> DeepSeek、MiniMax 等第三方模型走 OpenAI Chat/Anthropic 协议接入，归入「后端 OpenAI」一列。
+> DeepSeek、MiniMax 等第三方模型走 OpenAI Chat 兼容协议接入，归入「后端 OpenAI Chat」一列。
 
 ## 架构
 
 ```
-          ┌─ OpenAI --─┐
-          ├─ Gemini --─┤
-          └─ Responses ┘
+          ┌─ OpenAI ----─┐
+          ├─ Gemini -----┤
+          ├─ Responses --┤
+          └─ Anthropic --┘
                  │
-                 ▼
-          Controller (三套端点)
+          Controller (四套端点)
                  │
-          ProtocolAdapter (OpenAI/Gemini/Responses ↔ IR)
+          ProtocolAdapter (OpenAI/Gemini/Responses/Anthropic ↔ IR)
                  │
-            UnifiedChatRequest (IR)
+          UnifiedChatRequest (IR)
                  │
           ProxyOrchestrator (路由)
                  │
           BackendAdapter (IR ↔ 后端 SDK)
                  │
-           ┌─ OpenAI --─┐
-           └─ Anthropic ┘
+          ┌─ Gemini -----------┐
+          ├─ OpenAI Chat ------┤
+          ├─ OpenAI Responses -┤
+          └─ Anthropic --------┘
 ```
 
-- **入站**：`OpenAiProtocolAdapter`、`GeminiProtocolAdapter`、`ResponsesProtocolAdapter` 将各自原生协议转为 IR
+- **入站**：`OpenAiProtocolAdapter`、`ResponsesProtocolAdapter`、`GeminiProtocolAdapter`、`AnthropicProtocolAdapter` 将各自原生协议转为 IR
 - **调度**：`ProxyOrchestrator` 根据入站协议和 model 名路由到对应后端
 - **出站**：`BackendAdapter` 将 IR 转为后端原生协议，响应沿原路返回
 
@@ -45,9 +48,10 @@
 单向代理只能 OpenAI→Gemini，换个客户端协议就得重写。互转的核心是 IR：M 种客户端协议 + N 种后端 = M+N 个适配器，而非 M×N。
 
 ```
-OpenAI Chat ──→ IR ──→ Gemini / DeepSeek / OpenAI / Anthropic  ✅
-OpenAI Responses ──→ IR ──→ Gemini / DeepSeek / OpenAI / Anthropic  ✅
-Gemini ──→ IR ──→ Gemini / DeepSeek / OpenAI / Anthropic  ✅
+OpenAI Chat      ──→ IR ──→ Gemini / OpenAI Chat / OpenAI Responses / Anthropic  ✅
+OpenAI Responses ──→ IR ──→ Gemini / OpenAI Chat / OpenAI Responses / Anthropic  ✅
+Gemini           ──→ IR ──→ Gemini / OpenAI Chat / OpenAI Responses / Anthropic  ✅
+Anthropic        ──→ IR ──→ Gemini / OpenAI Chat / OpenAI Responses / Anthropic  ✅
 ```
 
 ## 端点
@@ -94,6 +98,24 @@ POST /v1/responses                    # 流式 (Accept: text/event-stream)
 ```
 
 请求/响应格式与 OpenAI Responses API 一致，支持 Codex 工具兼容。
+
+### Anthropic 端点
+
+```bash
+POST /v1/messages                     # 非流式
+POST /v1/messages                     # 流式 (Accept: text/event-stream)
+GET  /v1/models                       # 需带 anthropic-version 头
+```
+
+请求/响应格式与 Anthropic Messages API 一致。
+
+```bash
+curl http://localhost:8493/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: $API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-3-5-sonnet-20241022","max_tokens":256,"messages":[{"role":"user","content":"你好"}]}'
+```
 
 ### 管理端点
 
@@ -147,7 +169,7 @@ docker run -p 8493:8493 -e ADMIN_PASSWORD=your-password llmlinkj
 | `protocol_mapping` | 入站协议 → 目标后端 + enabled 开关 |
 | `model_mapping` | 请求模型 → 实际模型映射（复合主键 client_protocol + backend_cfg_name + request_model） |
 
-schema 由 Flyway 迁移管理（`src/main/resources/db/migration/V1__init.sql` ~ `V6__seed_data.sql`）。
+schema 由 Flyway 迁移管理（`src/main/resources/db/migration/V1__init.sql` ~ `V9__seed_openai_responses_protocol.sql`）。
 
 #### 管理 API（`/admin`，需登录）
 
@@ -191,11 +213,11 @@ schema 由 Flyway 迁移管理（`src/main/resources/db/migration/V1__init.sql` 
 ```
 src/main/java/com/ai8493/llmproxy/
 ├── adapter/
-│   ├── ProtocolAdapter.java       # 外部协议 ↔ IR
-│   ├── BackendAdapter.java        # IR ↔ 后端 SDK
-│   ├── anthropic/                 # Anthropic 协议 + 后端适配
-│   ├── gemini/                    # Gemini 协议 + 后端适配
-│   └── openai/                    # OpenAI 协议适配 + 后端适配（含 Responses）
+│   ├── ProtocolAdapter.java       # 外部协议 ↔ IR（入站契约）
+│   ├── BackendAdapter.java        # IR ↔ 后端 SDK（出站契约）
+│   ├── anthropic/                 # Anthropic：ProtocolAdapter + BackendAdapter + 3 个出站 Converter + 序列化 MixIn
+│   ├── gemini/                    # Gemini：ProtocolAdapter + BackendAdapter + 3 个出站 Converter + GeminiRequestContext
+│   └── openai/                    # OpenAI Chat 与 Responses 两套（各含 ProtocolAdapter + BackendAdapter + 3 个出站 Converter）
 ├── cache/                         # 会话级 reasoning 缓存
 ├── client/                        # 后端 HTTP 客户端工厂
 ├── clients/                       # 客户端配置文件管理（Codex / Gemini CLI）
@@ -205,7 +227,7 @@ src/main/java/com/ai8493/llmproxy/
 ├── exception/                     # 全局异常处理 + 异常类
 ├── filter/                        # TraceId / 请求响应日志过滤器
 ├── metrics/                       # Micrometer 指标
-├── model/                         # 14 个 IR record/sealed interface
+├── model/                         # 15 个 IR record/sealed interface + extensions/ 子包（Anthropic/OpenAi/GeminiExtensions + ThinkingConfig）
 ├── orchestrator/                  # 核心调度器（路由 + 模型映射）
 └── util/                          # 脱敏工具（API Key 仅显后 4 位）
 ```
@@ -247,7 +269,7 @@ Controller、协议转换、路由调度全部复用，无需改动。
 - 管理端点 `/admin/**` 需 form 登录（默认 admin / 123456，可用 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 覆盖）
 - 代理 API（`/v1/**`、`/v1beta/**`）不走 Spring Security，认证由 API Key 负责
 - CSRF 仅对 `/admin/**` 非安全方法校验
-- SSRF 防护：**当前已失效**——移除 proxy yml 配置时未恢复 `BackendUrlValidator`（见 `docs/superpowers/plans/2026-06-26-remove-proxy-yml-config.md`）
+- SSRF 防护：**当前已失效**——移除 proxy yml 配置时未恢复 `BackendUrlValidator`
 
 ## 许可证
 

@@ -16,5 +16,9 @@ public record BackendConfigEntity(
     long writeTimeout,
     int maxIdleConnections,
     long keepAliveDuration,
+    String reasoningEffortMode,
+    String reasoningEffortDefault,
+    String thinkingDefaultType,
+    Integer thinkingDefaultBudget,
     String updatedAt
 ) {}

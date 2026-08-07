@@ -2,7 +2,9 @@ package com.ai8493.llmproxy.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ai8493.llmproxy.adapter.anthropic.AnthropicProtocolAdapter;
 import com.ai8493.llmproxy.adapter.gemini.GeminiProtocolAdapter;
+import com.ai8493.llmproxy.adapter.gemini.GeminiRequestContext;
 import com.ai8493.llmproxy.adapter.openai.OpenAiProtocolAdapter;
 import com.ai8493.llmproxy.adapter.openai.ParseResult;
 import com.ai8493.llmproxy.adapter.openai.ResponsesProtocolAdapter;
@@ -12,13 +14,13 @@ import com.ai8493.llmproxy.orchestrator.ProxyOrchestrator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.util.DisconnectedClientHelper;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.io.IOException;
 import java.util.Map;
 
 @RestController
@@ -31,15 +33,18 @@ public class ProxyController {
     private final OpenAiProtocolAdapter openaiAdapter;
     private final GeminiProtocolAdapter geminiAdapter;
     private final ResponsesProtocolAdapter responsesAdapter;
+    private final AnthropicProtocolAdapter anthropicAdapter;
 
     public ProxyController(ProxyOrchestrator orchestrator,
                             OpenAiProtocolAdapter openaiAdapter,
                             GeminiProtocolAdapter geminiAdapter,
-                            ResponsesProtocolAdapter responsesAdapter) {
+                            ResponsesProtocolAdapter responsesAdapter,
+                            AnthropicProtocolAdapter anthropicAdapter) {
         this.orchestrator = orchestrator;
         this.openaiAdapter = openaiAdapter;
         this.geminiAdapter = geminiAdapter;
         this.responsesAdapter = responsesAdapter;
+        this.anthropicAdapter = anthropicAdapter;
     }
 
     // ===== OpenAI endpoints =====
@@ -164,6 +169,89 @@ public class ProxyController {
         }
     }
 
+    // ===== Anthropic endpoints =====
+
+    @PostMapping(value = "/v1/messages",
+                 consumes = MediaType.APPLICATION_JSON_VALUE,
+                 produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<byte[]> anthropicNonStream(@RequestBody byte[] rawBody,
+                                                       @RequestHeader Map<String, String> headers) {
+        try {
+            UnifiedChatRequest uReq = anthropicAdapter.toUnifiedRequest(rawBody, headers);
+            UnifiedChatResponse uResp = orchestrator.handle(uReq, anthropicAdapter.protocolName());
+            return ResponseEntity.ok(anthropicAdapter.fromUnifiedResponse(uResp));
+        } catch (Exception e) {
+            log.warn("Anthropic 非流式调用失败: {}", e.getMessage(), e);
+            int status = anthropicAdapter.errorStatusCode(e);
+            return ResponseEntity.status(status).body(anthropicAdapter.errorResponse(e));
+        }
+    }
+
+    @PostMapping(value = "/v1/messages",
+                 produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> anthropicStream(@RequestBody byte[] rawBody,
+                                                          @RequestHeader Map<String, String> headers) {
+        UnifiedChatRequest uReq;
+        try {
+            uReq = anthropicAdapter.toUnifiedRequest(rawBody, headers);
+        } catch (Exception e) {
+            log.warn("Anthropic 流式请求解析失败: {}", e.getMessage(), e);
+            return Flux.just(ServerSentEvent.<String>builder()
+                .data(anthropicAdapter.errorStreamEvent(e))
+                .build());
+        }
+        AnthropicProtocolAdapter.StreamState state = new AnthropicProtocolAdapter.StreamState();
+        return orchestrator.handleStream(uReq, anthropicAdapter.protocolName())
+            .doOnNext(ir -> log.debug("Anthropic SSE IR 块: {}", ir))
+            .flatMapIterable(chunk -> anthropicAdapter.toStreamEvents(chunk, state))
+            .doOnNext(event -> log.debug("Anthropic SSE 事件: {}", event))
+            .map(json -> ServerSentEvent.<String>builder().data(json).build())
+            .concatWith(Flux.defer(() -> Flux.fromIterable(anthropicAdapter.finalizeStream(state))
+                .map(json -> ServerSentEvent.<String>builder().data(json).build())))
+            .onErrorResume(e -> {
+                if (isClientDisconnected(e)) {
+                    log.warn("SSE 流式传输中客户端断开: {}", e.getMessage());
+                    return Flux.empty();
+                }
+                log.warn("SSE 流式传输中异常，转成 error 事件吐给客户端: {}", e.getMessage());
+                return Flux.just(ServerSentEvent.<String>builder()
+                    .data(anthropicAdapter.errorStreamEvent(e))
+                    .build());
+            });
+    }
+
+    @GetMapping(value = "/v1/models",
+                headers = "anthropic-version",
+                produces = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<String> anthropicModels() {
+        log.debug("GET /v1/models (Anthropic): 查询模型列表");
+        return Mono.fromCallable(() -> {
+            var models = orchestrator.listModels(anthropicAdapter.protocolName());
+            log.debug("GET /v1/models (Anthropic): 获取到 {} 个模型", models.size());
+            var root = objectMapper.createObjectNode();
+            var data = objectMapper.createArrayNode();
+            for (var m : models) {
+                var obj = objectMapper.createObjectNode();
+                obj.put("id", m.id());
+                obj.put("type", "model");
+                obj.put("display_name", m.id());
+                obj.put("created_at", "2025-01-01T00:00:00Z");
+                data.add(obj);
+            }
+            root.set("data", data);
+            root.put("has_more", false);
+            if (!models.isEmpty()) {
+                root.put("first_id", models.get(0).id());
+                root.put("last_id", models.get(models.size() - 1).id());
+            }
+            String json = objectMapper.writeValueAsString(root);
+            if (log.isDebugEnabled()) {
+                log.debug("GET /v1/models (Anthropic) 响应: {}", json);
+            }
+            return json;
+        }).doOnError(e -> log.warn("GET /v1/models (Anthropic) 失败: {}", e.getMessage(), e));
+    }
+
     // ===== Gemini endpoints =====
 
     @PostMapping(value = "/v1beta/models/{model}:generateContent",
@@ -174,15 +262,23 @@ public class ProxyController {
                                          @RequestHeader Map<String, String> headers) {
         try {
             String sessionKey = geminiAdapter.extractSessionKeyForController(headers, rawBody);
-            geminiAdapter.setCurrentSessionKey(sessionKey);
+            GeminiRequestContext ctx = new GeminiRequestContext(sessionKey);
             UnifiedChatRequest uReq = geminiAdapter.toUnifiedRequest(rawBody, headers);
             if (uReq.model() == null) {
-                uReq = new UnifiedChatRequest(model, uReq.messages(), uReq.config(),
-                    uReq.tools(), uReq.toolChoice(), uReq.stream());
+                uReq = UnifiedChatRequest.builder()
+                    .model(model)
+                    .messages(uReq.messages())
+                    .config(uReq.config())
+                    .tools(uReq.tools())
+                    .toolChoice(uReq.toolChoice())
+                    .stream(uReq.stream())
+                    .anthropic(uReq.anthropic())
+                    .openai(uReq.openai())
+                    .gemini(uReq.gemini())
+                    .build();
             }
             UnifiedChatResponse uResp = orchestrator.handle(uReq, geminiAdapter.protocolName());
-            return Mono.just(geminiAdapter.fromUnifiedResponse(uResp))
-                .doFinally(s -> geminiAdapter.clearCurrentSessionKey());
+            return Mono.just(geminiAdapter.fromUnifiedResponse(uResp, ctx));
         } catch (Exception e) {
             return Mono.error(e);
         }
@@ -196,15 +292,24 @@ public class ProxyController {
                                        @RequestHeader Map<String, String> headers) {
         try {
             String sessionKey = geminiAdapter.extractSessionKeyForController(headers, rawBody);
-            geminiAdapter.setCurrentSessionKey(sessionKey);
+            GeminiRequestContext ctx = new GeminiRequestContext(sessionKey);
             UnifiedChatRequest uReq = geminiAdapter.toUnifiedRequest(rawBody, headers);
             String actualModel = uReq.model() != null ? uReq.model() : model;
-            uReq = new UnifiedChatRequest(actualModel, uReq.messages(), uReq.config(),
-                uReq.tools(), uReq.toolChoice(), true);
+            uReq = UnifiedChatRequest.builder()
+                .model(actualModel)
+                .messages(uReq.messages())
+                .config(uReq.config())
+                .tools(uReq.tools())
+                .toolChoice(uReq.toolChoice())
+                .stream(true)
+                .anthropic(uReq.anthropic())
+                .openai(uReq.openai())
+                .gemini(uReq.gemini())
+                .build();
             return orchestrator.handleStream(uReq, geminiAdapter.protocolName())
                 .doOnNext(ir -> log.debug("客户端 SSE IR 块: {}", ir))
                 .map(ir -> ServerSentEvent.<String>builder()
-                    .data(" " + geminiAdapter.fromUnifiedStreamChunk(ir))
+                    .data(" " + geminiAdapter.fromUnifiedStreamChunk(ir, ctx))
                     .build())
                 .doOnNext(sse -> log.debug("客户端 SSE 行: {}", sse.data()))
                 .onErrorResume(e -> {
@@ -216,8 +321,7 @@ public class ProxyController {
                     return Flux.just(ServerSentEvent.<String>builder()
                         .data(geminiAdapter.errorStreamEvent(e))
                         .build());
-                })
-                .doFinally(s -> geminiAdapter.clearCurrentSessionKey());
+                });
         } catch (Exception e) {
             return Flux.error(e);
         }

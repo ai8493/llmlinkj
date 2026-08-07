@@ -14,8 +14,11 @@ import com.openai.models.ResponsesModel;
 import com.openai.models.responses.*;
 import java.time.Instant;
 import com.ai8493.llmproxy.adapter.ProtocolAdapter;
+import com.ai8493.llmproxy.cache.SessionStore;
 import com.ai8493.llmproxy.exception.BackendApiException;
+import com.ai8493.llmproxy.exception.TransformException;
 import com.ai8493.llmproxy.model.*;
+import com.ai8493.llmproxy.model.extensions.OpenAiExtensions;
 import org.springframework.stereotype.Component;
 import java.util.*;
 
@@ -38,6 +41,12 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                 }
             });
         }});
+
+    private final SessionStore sessionStore;
+
+    public ResponsesProtocolAdapter(SessionStore sessionStore) {
+        this.sessionStore = sessionStore;
+    }
 
     /**
      * 流式转换累积状态。
@@ -73,6 +82,10 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
         public long totalTokens;
         public long cachedTokens;
         public long reasoningTokens;
+
+        // 流截断分类:跟踪是否已收到 finishReason + 是否有实质性输出
+        public boolean hasFinishReason;
+        public boolean hasSubstantiveOutput;
 
         // 请求回显
         public String instructions;
@@ -121,6 +134,12 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             JsonNode root = mapper.readTree(rawRequest);
             boolean stream = root.has("stream") && root.get("stream").asBoolean(false);
 
+            // 跨请求恢复 function_call:按 previous_response_id 从 SessionStore 补全缺失的 call item
+            // DeepSeek/kimi 等后端要求 assistant tool_call 紧邻 tool result,否则 400
+            if (root.isObject() && sessionStore != null) {
+                sessionStore.enrichRequest((ObjectNode) root);
+            }
+
             byte[] processed = preprocessInputTypes(root);
             ResponseCreateParams.Body body = mapper.readValue(processed,
                 ResponseCreateParams.Body.class);
@@ -130,7 +149,8 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             }
 
             String model = body.model().map(ResponsesProtocolAdapter::extractModelName).orElse("");
-            String instructions = body.instructions().orElse(null);
+            String instructions = com.ai8493.llmproxy.util.BillingHeaderStripper.strip(
+                body.instructions().orElse(null));
 
             List<UnifiedMessage> messages = parseSdkInput(body.input(), instructions);
 
@@ -157,20 +177,63 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                 }
             }
 
-            UnifiedGenerationConfig config = new UnifiedGenerationConfig(
-                body.temperature().orElse(null),
-                body.topP().orElse(null),
-                body.maxOutputTokens().map(Long::intValue).orElse(null),
-                stop,
-                reasoningEffort,
-                body.user().orElse(null),
-                body.parallelToolCalls().orElse(null),
-                null
-            );
+            UnifiedGenerationConfig config = UnifiedGenerationConfig.builder()
+                .temperature(body.temperature().orElse(null))
+                .topP(body.topP().orElse(null))
+                .maxOutputTokens(body.maxOutputTokens().map(Long::intValue).orElse(null))
+                .stopSequences(stop)
+                .reasoningEffort(reasoningEffort)
+                .user(body.user().orElse(null))
+                .parallelToolCalls(body.parallelToolCalls().orElse(null))
+                .build();
             List<UnifiedTool> tools = parseSdkTools(body.tools(), ctx);
             UnifiedToolChoice toolChoice = parseSdkToolChoice(body.toolChoice());
 
-            return new UnifiedChatRequest(model, messages, config, tools, toolChoice, stream);
+            // 从 raw JSON 读 OpenAI 专属字段(SDK ResponseCreateParams.Body 不支持)
+            OpenAiExtensions openaiExt = null;
+            if (root.has("logprobs") || root.has("top_logprobs") || root.has("seed")
+                    || root.has("n") || root.has("response_format")
+                    || root.has("previous_response_id") || root.has("include")) {
+                OpenAiExtensions.Builder extBuilder = OpenAiExtensions.builder();
+                if (root.has("logprobs")) {
+                    extBuilder.logprobs(root.get("logprobs").asBoolean());
+                }
+                if (root.has("top_logprobs")) {
+                    extBuilder.topLogprobs(root.get("top_logprobs").asInt());
+                }
+                if (root.has("seed")) {
+                    extBuilder.seed(root.get("seed").asLong());
+                }
+                if (root.has("n")) {
+                    extBuilder.n(root.get("n").asInt());
+                }
+                if (root.has("response_format")) {
+                    extBuilder.responseFormat(root.get("response_format"));
+                }
+                if (root.has("previous_response_id") && root.get("previous_response_id").isTextual()) {
+                    extBuilder.previousResponseId(root.get("previous_response_id").asText());
+                }
+                if (root.has("include") && root.get("include").isArray()) {
+                    List<String> includeList = new ArrayList<>();
+                    for (JsonNode inc : root.get("include")) {
+                        if (inc.isTextual()) includeList.add(inc.asText());
+                    }
+                    if (!includeList.isEmpty()) {
+                        extBuilder.include(includeList);
+                    }
+                }
+                openaiExt = extBuilder.build();
+            }
+
+            return UnifiedChatRequest.builder()
+                .model(model)
+                .messages(messages)
+                .config(config)
+                .tools(tools)
+                .toolChoice(toolChoice)
+                .stream(stream)
+                .openai(openaiExt)
+                .build();
         } catch (IllegalArgumentException e) {
             throw e;
         } catch (Exception e) {
@@ -290,9 +353,19 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                     .build());
             }
 
-            return mapper.writeValueAsBytes(builder.build());
+            Response response = builder.build();
+            // 缓存 response_id -> output 中的 function_call items,供后续 previous_response_id 恢复
+            if (sessionStore != null) {
+                try {
+                    JsonNode respNode = mapper.valueToTree(response);
+                    sessionStore.recordResponse(respId, respNode.get("output"));
+                } catch (Exception ex) {
+                    // 缓存失败不影响主流程
+                }
+            }
+            return mapper.writeValueAsBytes(response);
         } catch (Exception e) {
-            throw new RuntimeException("序列化 Responses 响应失败", e);
+            throw new TransformException("序列化 Responses 响应失败", e);
         }
     }
 
@@ -360,7 +433,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
 
             return mapper.writeValueAsBytes(root);
         } catch (Exception e) {
-            throw new RuntimeException("序列化 Responses 响应失败", e);
+            throw new TransformException("序列化 Responses 响应失败", e);
         }
     }
 
@@ -420,7 +493,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                         .logprobs(List.of())
                         .build());
             } catch (Exception e) {
-                throw new RuntimeException("序列化 Responses 流块失败", e);
+                throw new TransformException("序列化 Responses 流块失败", e);
             }
         }
         return "";
@@ -495,6 +568,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                     st.reasoningPartAdded = true;
                 }
                 st.reasoningBuf.append(rc);
+                st.hasSubstantiveOutput = true;
                 events.add(mapper.writeValueAsString(
                     ResponseReasoningSummaryTextDeltaEvent.builder()
                         .itemId(st.reasoningItemId)
@@ -508,6 +582,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
 
             // 2c. 文本 delta — 若 reasoning 活跃则先关闭
             if (delta != null && delta.content() != null && !delta.content().isEmpty()) {
+                st.hasSubstantiveOutput = true;
                 if (st.inReasoningBlock) {
                     events.addAll(closeReasoningBlock(st));
                 }
@@ -560,6 +635,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             // 2d. tool_calls delta 处理
             List<UnifiedToolCall> deltaToolCalls = (delta != null) ? delta.toolCalls() : null;
             if (deltaToolCalls != null && !deltaToolCalls.isEmpty()) {
+                st.hasSubstantiveOutput = true;
                 // 首次遇到 tool_call 时关闭 reasoning 和 text block
                 if (!st.inFuncBlock) {
                     st.inFuncBlock = true;
@@ -675,6 +751,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             // 2f. finish_reason 处理
             String finishReason = (!chunk.choices().isEmpty()) ? chunk.choices().get(0).finishReason() : null;
             if (finishReason != null) {
+                st.hasFinishReason = true;
                 if (st.inReasoningBlock) events.addAll(closeReasoningBlock(st));
                 if (st.inTextBlock) events.addAll(closeTextBlock(st));
                 if (st.inFuncBlock) events.addAll(closeFuncBlocks(st));
@@ -682,7 +759,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
 
             return events;
         } catch (Exception e) {
-            throw new RuntimeException("序列化 Responses 流事件失败", e);
+            throw new TransformException("序列化 Responses 流事件失败", e);
         }
     }
 
@@ -846,6 +923,9 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                     item.put("input", customInput);
                     itemDone.set("item", item);
                     out.add(mapper.writeValueAsString(itemDone));
+                    if (sessionStore != null) {
+                        sessionStore.recordCallItem(st.responseId, item);
+                    }
                 } else {
                     // function_call: 正常发送 arguments.done + output_item.done
                     String displayName = acc.remapKind == 2
@@ -876,6 +956,9 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                     }
                     itemDone.set("item", item);
                     out.add(mapper.writeValueAsString(itemDone));
+                    if (sessionStore != null) {
+                        sessionStore.recordCallItem(st.responseId, item);
+                    }
                 }
             }
             st.inFuncBlock = false;
@@ -975,7 +1058,10 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             var respBuilder = Response.builder()
                 .id(st.responseId).createdAt((double) st.createdAt)
                 .model(st.modelName).object_(JsonValue.from("response"))
-                .status(ResponseStatus.COMPLETED).output(outputs);
+                .output(outputs);
+
+            // 默认 status=COMPLETED,流截断分类在下面覆盖
+            respBuilder.status(ResponseStatus.COMPLETED);
 
             // usage（始终输出）
             var usageBuilder = ResponseUsage.builder()
@@ -991,6 +1077,28 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             respBuilder
                 .error((ResponseError) null)
                 .incompleteDetails((Response.IncompleteDetails) null);
+
+            // 流截断分类:无 finishReason 时按是否有实质性输出兜底
+            // - 有输出 -> INCOMPLETE + reason=max_output_tokens(标记为不完整)
+            // - 无输出 -> FAILED + error(stream_truncated)
+            // - 有 finishReason -> COMPLETED(默认,无需覆盖)
+            String eventType = "response.completed";
+            if (!st.hasFinishReason) {
+                if (st.hasSubstantiveOutput) {
+                    respBuilder.status(ResponseStatus.INCOMPLETE)
+                        .incompleteDetails(Response.IncompleteDetails.builder()
+                            .reason(Response.IncompleteDetails.Reason.MAX_OUTPUT_TOKENS)
+                            .build());
+                    // 仍发 completed 事件,但 response.status=incomplete
+                } else {
+                    respBuilder.status(ResponseStatus.FAILED)
+                        .error(ResponseError.builder()
+                            .code(ResponseError.Code.of("stream_truncated"))
+                            .message("上游流式响应被截断: 无输出且未发送 finish_reason")
+                            .build());
+                    eventType = "response.failed";
+                }
+            }
             respBuilder.instructions(st.instructions != null && !st.instructions.isEmpty()
                 ? Response.Instructions.ofString(st.instructions) : null);
             respBuilder.metadata((Response.Metadata) null);
@@ -1029,7 +1137,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
 
             // 构建事件 JSON
             ObjectNode event = mapper.createObjectNode();
-            event.put("type", "response.completed");
+            event.put("type", eventType);
             event.set("response", mapper.valueToTree(respBuilder.build()));
             event.put("sequence_number", st.nextSeq());
             return mapper.writeValueAsString(event);
@@ -1146,6 +1254,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             case UnifiedToolChoice.Auto __ -> Response.ToolChoice.ofOptions(ToolChoiceOptions.AUTO);
             case UnifiedToolChoice.Required r -> Response.ToolChoice.ofFunction(
                 ToolChoiceFunction.builder().name(r.functionName()).build());
+            case UnifiedToolChoice.Any __ -> Response.ToolChoice.ofOptions(ToolChoiceOptions.REQUIRED);
         };
     }
 
@@ -1157,8 +1266,10 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
 
         // instructions 独立为一条 SYSTEM 消息
         if (instructions != null && !instructions.isEmpty()) {
-            messages.add(new UnifiedMessage(UnifiedMessage.Role.SYSTEM,
-                instructions, null, null, null, null, null));
+            messages.add(UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.SYSTEM)
+                .content(instructions)
+                .build());
         }
 
         if (input.isEmpty()) {
@@ -1167,8 +1278,10 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
 
         var inp = input.get();
         if (inp.isText()) {
-            messages.add(new UnifiedMessage(UnifiedMessage.Role.USER, inp.asText(),
-                null, null, null, null, null));
+            messages.add(UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.USER)
+                .content(inp.asText())
+                .build());
             return messages;
         }
 
@@ -1198,8 +1311,14 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                 try { fnArgs = mapper.readTree(fnArgsStr); }
                 catch (Exception __) { fnArgs = mapper.createObjectNode(); }
                 String tcId = fc.callId() != null ? fc.callId() : fc.id().orElse("");
-                pendingToolCalls.add(new UnifiedToolCall(tcId, "function",
-                    new UnifiedFunctionCall(fnName, fnArgs)));
+                pendingToolCalls.add(UnifiedToolCall.builder()
+                    .id(tcId)
+                    .type("function")
+                    .function(UnifiedFunctionCall.builder()
+                        .name(fnName)
+                        .arguments(fnArgs)
+                        .build())
+                    .build());
                 continue;
             }
 
@@ -1211,8 +1330,14 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                 // 将原始输入字符串包装为 {"input":"..."}
                 ObjectNode argsObj = mapper.createObjectNode();
                 argsObj.put("input", rawInput);
-                pendingToolCalls.add(new UnifiedToolCall(tcId, "function",
-                    new UnifiedFunctionCall(fnName, argsObj)));
+                pendingToolCalls.add(UnifiedToolCall.builder()
+                    .id(tcId)
+                    .type("function")
+                    .function(UnifiedFunctionCall.builder()
+                        .name(fnName)
+                        .arguments(argsObj)
+                        .build())
+                    .build());
                 continue;
             }
 
@@ -1229,24 +1354,32 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             } else if (item.isWebSearchCall() || item.isFileSearchCall()
                     || item.isComputerCall() || item.isCodeInterpreterCall()) {
                 // 内置工具调用按 assistant 空消息处理，不影响消息流
-                msg = new UnifiedMessage(UnifiedMessage.Role.ASSISTANT,
-                    null, null, null, null, null, null);
+                msg = UnifiedMessage.builder().role(UnifiedMessage.Role.ASSISTANT).build();
             }
 
             if (msg == null) continue;
 
             // developer -> user（非标准角色降级）
             if (msg.role() == UnifiedMessage.Role.SYSTEM && isDeveloperRole(item)) {
-                msg = new UnifiedMessage(UnifiedMessage.Role.USER, msg.content(),
-                    null, null, null, null, null);
+                msg = UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.USER)
+                    .content(msg.content())
+                    .build();
             }
 
             // 合并 pending reasoning 到 assistant 消息
             if (!pendingReasoning.isEmpty()) {
                 if (msg.role() == UnifiedMessage.Role.ASSISTANT && pendingToolCalls.isEmpty()) {
                     String rc = String.join("\n", pendingReasoning);
-                    msg = new UnifiedMessage(msg.role(), msg.content(), msg.parts(),
-                        msg.toolCalls(), msg.toolCallId(), msg.name(), rc);
+                    msg = UnifiedMessage.builder()
+                        .role(msg.role())
+                        .content(msg.content())
+                        .parts(msg.parts())
+                        .toolCalls(msg.toolCalls())
+                        .toolCallId(msg.toolCallId())
+                        .name(msg.name())
+                        .reasoningContent(rc)
+                        .build();
                     reasoningMerged = true;
                 } else if (pendingToolCalls.isEmpty() && !reasoningMerged) {
                     flushReasoning(messages, pendingReasoning);
@@ -1285,8 +1418,10 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
 
     private void flushReasoning(List<UnifiedMessage> messages, List<String> pendingReasoning) {
         String rc = String.join("\n", pendingReasoning);
-        messages.add(new UnifiedMessage(UnifiedMessage.Role.ASSISTANT,
-            null, null, null, null, null, rc));
+        messages.add(UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.ASSISTANT)
+            .reasoningContent(rc)
+            .build());
         pendingReasoning.clear();
     }
 
@@ -1294,8 +1429,11 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             List<String> pendingReasoning, List<UnifiedToolCall> pendingToolCalls) {
         String rc = !pendingReasoning.isEmpty() ? String.join("\n", pendingReasoning) : null;
         if (!pendingReasoning.isEmpty()) pendingReasoning.clear();
-        messages.add(new UnifiedMessage(UnifiedMessage.Role.ASSISTANT,
-            null, null, new ArrayList<>(pendingToolCalls), null, null, rc));
+        messages.add(UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.ASSISTANT)
+            .toolCalls(new ArrayList<>(pendingToolCalls))
+            .reasoningContent(rc)
+            .build());
         pendingToolCalls.clear();
     }
 
@@ -1335,7 +1473,11 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                 content = extractTextFromContent(contentList);
             }
         }
-        return new UnifiedMessage(role, content, parts, null, null, null, null);
+        return UnifiedMessage.builder()
+            .role(role)
+            .content(content)
+            .parts(parts)
+            .build();
     }
 
     private UnifiedMessage mapSdkMessage(ResponseInputItem.Message msg) {
@@ -1356,7 +1498,11 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
         } else {
             content = extractTextFromContent(contentList);
         }
-        return new UnifiedMessage(role, content, parts, null, null, null, null);
+        return UnifiedMessage.builder()
+            .role(role)
+            .content(content)
+            .parts(parts)
+            .build();
     }
 
     private String extractTextFromContent(List<ResponseInputContent> contentList) {
@@ -1383,7 +1529,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
         List<UnifiedPart> parts = new ArrayList<>();
         for (var c : contentList) {
             if (c.isInputText()) {
-                parts.add(new UnifiedPart("text", c.asInputText().text(), null, null, null));
+                parts.add(new UnifiedPart.TextPart(c.asInputText().text()));
             } else if (c.isInputImage()) {
                 var img = c.asInputImage();
                 ObjectNode imageData = mapper.createObjectNode();
@@ -1395,7 +1541,7 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                         imageData.put("detail", ds);
                     }
                 }
-                parts.add(new UnifiedPart("image_url", null, imageData, null, null));
+                parts.add(new UnifiedPart.ImagePart(imageData));
             }
         }
         return parts;
@@ -1410,10 +1556,18 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
         // 使用 callId 作为 tool call ID，确保与 function_call_output 的 call_id 匹配
         String tcId = fc.callId() != null ? fc.callId()
             : fc.id().orElse("");
-        var tc = new UnifiedToolCall(
-            tcId, "function", new UnifiedFunctionCall(fnName, fnArgs));
-        return new UnifiedMessage(UnifiedMessage.Role.ASSISTANT, null,
-            null, List.of(tc), null, null, null);
+        var tc = UnifiedToolCall.builder()
+            .id(tcId)
+            .type("function")
+            .function(UnifiedFunctionCall.builder()
+                .name(fnName)
+                .arguments(fnArgs)
+                .build())
+            .build();
+        return UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.ASSISTANT)
+            .toolCalls(List.of(tc))
+            .build();
     }
 
     private UnifiedMessage mapSdkFunctionCallOutput(
@@ -1430,8 +1584,11 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             try { output = mapper.writeValueAsString(out.asResponseFunctionCallOutputItemList()); }
             catch (Exception e) { output = "{}"; }
         }
-        return new UnifiedMessage(UnifiedMessage.Role.TOOL, output,
-            null, null, callId, null, null);
+        return UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.TOOL)
+            .content(output)
+            .toolCallId(callId)
+            .build();
     }
 
     private UnifiedMessage mapSdkCustomToolCallOutput(
@@ -1445,8 +1602,11 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
             try { output = mapper.writeValueAsString(out.asContentList()); }
             catch (Exception e) { output = "{}"; }
         }
-        return new UnifiedMessage(UnifiedMessage.Role.TOOL, output,
-            null, null, callId, null, null);
+        return UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.TOOL)
+            .content(output)
+            .toolCallId(callId)
+            .build();
     }
 
     private List<UnifiedTool> parseSdkTools(Optional<List<Tool>> toolsOpt) {
@@ -1461,9 +1621,14 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                 var fn = t.asFunction();
                 JsonNode fnParams = mapper.convertValue(
                     fn.parameters().orElse(null), JsonNode.class);
-                result.add(new UnifiedTool("function",
-                    new UnifiedFunctionDefinition(
-                        fn.name(), fn.description().orElse(null), fnParams)));
+                result.add(UnifiedTool.builder()
+                    .type("function")
+                    .function(UnifiedFunctionDefinition.builder()
+                        .name(fn.name())
+                        .description(fn.description().orElse(null))
+                        .parameters(fnParams)
+                        .build())
+                    .build());
             } else if (t.isCustom()) {
                 var ct = t.asCustom();
                 String name = ct.name();
@@ -1476,7 +1641,8 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                 } else {
                     result.addAll(CodexToolCompat.expandCustom(name, desc));
                     if (ctx != null) {
-                        ctx.putCustom(name, name, ToolRemapContext.Kind.RAW);
+                        // P3-14: 保留原始 description 到 CustomSpec,供响应侧还原
+                        ctx.putCustom(name, name, ToolRemapContext.Kind.RAW, desc);
                     }
                 }
             } else if (t.isNamespace()) {
@@ -1488,9 +1654,14 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                         JsonNode fnParams = fn._parameters().isMissing()
                             ? null
                             : fn._parameters().convert(JsonNode.class);
-                        children.add(new UnifiedTool("function",
-                            new UnifiedFunctionDefinition(
-                                fn.name(), fn.description().orElse(null), fnParams)));
+                        children.add(UnifiedTool.builder()
+                            .type("function")
+                            .function(UnifiedFunctionDefinition.builder()
+                                .name(fn.name())
+                                .description(fn.description().orElse(null))
+                                .parameters(fnParams)
+                                .build())
+                            .build());
                     }
                 }
                 String nsAlias = ctx != null ? ctx.generateAlias(nt.name()) : null;
@@ -1498,10 +1669,10 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                     nt.name(), nt.description(), children, nsAlias));
                 if (ctx != null) {
                     String cleanNs = nt.name().replace("__", "_").replaceAll("_+$", "");
-                    String prefix = cleanNs + "_";
                     for (UnifiedTool child : children) {
                         if (child == null || child.function() == null || child.function().name() == null) continue;
-                        String flatName = prefix + child.function().name();
+                        // P3-13: 用 computeFlatName 保证与 expandNamespace 内部计算一致(含长度截断)
+                        String flatName = CodexToolCompat.computeFlatName(cleanNs, child.function().name());
                         ctx.putNamespace(flatName, child.function().name(), nt.name(), nsAlias);
                     }
                 }
@@ -1517,16 +1688,18 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
         var tc = tcOpt.get();
         if (tc.isOptions()) {
             return switch (tc.asOptions().asString()) {
-                case "none" -> new UnifiedToolChoice.None();
-                default -> new UnifiedToolChoice.Auto();
+                case "none" -> UnifiedToolChoice.None.builder().build();
+                default -> UnifiedToolChoice.Auto.builder().build();
             };
         }
         if (tc.isFunction()) {
             String fnName = tc.asFunction().name() != null
                 ? tc.asFunction().name() : "";
-            return new UnifiedToolChoice.Required(fnName);
+            return UnifiedToolChoice.Required.builder()
+                .functionName(fnName)
+                .build();
         }
-        return new UnifiedToolChoice.Auto();
+        return UnifiedToolChoice.Auto.builder().build();
     }
 
     /** SDK 无法识别的 input item，通过原始 JSON 兜底解析 */
@@ -1552,17 +1725,24 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                 toolCalls = parseSdkToolCallsFromNode(node.get("tool_calls"));
             }
 
-            return new UnifiedMessage(
-                switch (role) {
+            return UnifiedMessage.builder()
+                .role(switch (role) {
                     case "system" -> UnifiedMessage.Role.SYSTEM;
                     case "user" -> UnifiedMessage.Role.USER;
                     case "assistant" -> UnifiedMessage.Role.ASSISTANT;
                     case "tool" -> UnifiedMessage.Role.TOOL;
                     default -> UnifiedMessage.Role.USER;
-                },
-                content, null, toolCalls, toolCallId, name, null);
+                })
+                .content(content)
+                .toolCalls(toolCalls)
+                .toolCallId(toolCallId)
+                .name(name)
+                .build();
         } catch (Exception e) {
-            return new UnifiedMessage(UnifiedMessage.Role.USER, "", null, null, null, null, null);
+            return UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.USER)
+                .content("")
+                .build();
         }
     }
 
@@ -1585,7 +1765,14 @@ public class ResponsesProtocolAdapter implements ProtocolAdapter {
                     } else fnArgs = a;
                 }
             }
-            result.add(new UnifiedToolCall(id, "function", new UnifiedFunctionCall(fnName, fnArgs)));
+            result.add(UnifiedToolCall.builder()
+                .id(id)
+                .type("function")
+                .function(UnifiedFunctionCall.builder()
+                    .name(fnName)
+                    .arguments(fnArgs)
+                    .build())
+                .build());
         }
         return result.isEmpty() ? null : result;
     }

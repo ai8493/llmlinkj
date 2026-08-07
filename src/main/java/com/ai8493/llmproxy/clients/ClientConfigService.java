@@ -42,6 +42,7 @@ public class ClientConfigService {
         this.configFieldUpdater = configFieldUpdater;
         register(new CodexClient(PROXY_BASE_URL, apiKey));
         register(new GeminiCliClient(PROXY_BASE_URL, apiKey));
+        register(new ClaudeCodeClient(PROXY_BASE_URL, apiKey));
     }
 
     private void register(ClientDefinition client) {

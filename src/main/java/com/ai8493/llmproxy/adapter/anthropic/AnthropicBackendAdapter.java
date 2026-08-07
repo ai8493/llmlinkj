@@ -15,6 +15,7 @@ import com.ai8493.llmproxy.model.UnifiedChatResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -68,7 +69,7 @@ public class AnthropicBackendAdapter implements BackendAdapter {
             log.error("{} 后端请求失败: status={} body={}", backendName,
                 e.statusCode(), e.body());
             throw new BackendApiException(backendName, e.statusCode(),
-                "Anthropic API 调用失败: " + e.getMessage());
+                "Anthropic API 调用失败: " + e.getMessage(), String.valueOf(e.body()));
         } catch (Exception e) {
             log.error("{} 后端请求异常: {}", backendName, e.getMessage(), e);
             throw new BackendApiException(backendName, 502,
@@ -78,7 +79,7 @@ public class AnthropicBackendAdapter implements BackendAdapter {
 
     @Override
     public Flux<UnifiedChatResponse> stream(UnifiedChatRequest request) {
-        return Flux.create(sink -> {
+        return Flux.<UnifiedChatResponse>create(sink -> {
             try {
                 var reqConverter = new AnthropicRequestConverter(defaultMaxTokens);
                 MessageCreateParams params = reqConverter.convert(request);
@@ -165,18 +166,30 @@ public class AnthropicBackendAdapter implements BackendAdapter {
                     });
                 }
                 log.debug("{} 流式响应完成", backendName);
+                // 流截断分类:无 stopReason 时按是否有输出兜底
+                if (!respConverter.isStreamCompleted() && !sink.isCancelled()) {
+                    if (respConverter.hasSubstantiveOutput()) {
+                        log.warn("{} 流式响应被截断: 已有输出但无 stopReason,合成 finish_reason=length", backendName);
+                        sink.next(respConverter.synthesizeIncompleteChunk());
+                    } else {
+                        log.error("{} 流式响应被截断: 无输出且无 stopReason,标记为 stream_truncated", backendName);
+                        sink.error(new BackendApiException(backendName, 502,
+                            "上游流式响应被截断: 无输出且未发送 stop_reason"));
+                        return;
+                    }
+                }
                 sink.complete();
             } catch (AnthropicServiceException e) {
                 log.error("{} 流式请求失败: status={} body={}", backendName,
                     e.statusCode(), e.body());
                 sink.error(new BackendApiException(backendName, e.statusCode(),
-                    "Anthropic API 流式调用失败: " + e.getMessage()));
+                    "Anthropic API 流式调用失败: " + e.getMessage(), String.valueOf(e.body())));
             } catch (Exception e) {
                 log.error("{} 流式请求异常: {}", backendName, e.getMessage(), e);
                 sink.error(new BackendApiException(backendName, 502,
                     "Anthropic API 流式调用失败: " + e.getMessage()));
             }
-        });
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     private static void logRequestParams(String name, MessageCreateParams params, String label) {
@@ -240,7 +253,11 @@ public class AnthropicBackendAdapter implements BackendAdapter {
             var page = client.models().list();
             List<ModelInfo> result = new ArrayList<>();
             for (var model : page.data()) {
-                result.add(new ModelInfo(model.id(), 0L, "anthropic"));
+                result.add(ModelInfo.builder()
+                        .id(model.id())
+                        .created(0L)
+                        .ownedBy("anthropic")
+                        .build());
             }
             log.debug("{} 模型列表: {} 个模型", backendName, result.size());
             return result;
@@ -248,7 +265,7 @@ public class AnthropicBackendAdapter implements BackendAdapter {
             log.error("{} 获取模型列表失败: status={} body={}", backendName,
                 e.statusCode(), e.body());
             throw new BackendApiException(backendName, e.statusCode(),
-                "Anthropic 模型列表获取失败: " + e.getMessage());
+                "Anthropic 模型列表获取失败: " + e.getMessage(), String.valueOf(e.body()));
         } catch (Exception e) {
             log.error("{} 获取模型列表异常: {}", backendName, e.getMessage(), e);
             throw new BackendApiException(backendName, 502,

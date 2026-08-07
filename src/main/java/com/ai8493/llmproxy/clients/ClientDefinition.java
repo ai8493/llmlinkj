@@ -2,9 +2,9 @@ package com.ai8493.llmproxy.clients;
 
 import java.util.List;
 
-// 客户端定义契约。sealed permits 在 Task 3 加 GeminiCliClient 时一并补全
+// 客户端定义契约。sealed permits 在新增客户端时一并补全
 public sealed interface ClientDefinition
-    permits CodexClient, GeminiCliClient {
+    permits CodexClient, GeminiCliClient, ClaudeCodeClient {
 
     String id();          // URL 路径段 + 文件目录名，如 "codex"
     String displayName(); // 左列表展示，如 "Codex"

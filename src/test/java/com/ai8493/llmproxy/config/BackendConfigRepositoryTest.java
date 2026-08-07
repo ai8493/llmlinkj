@@ -39,7 +39,7 @@ class BackendConfigRepositoryTest {
         var entity = new BackendConfigEntity(
             "test-backend", "openai", "sk-test", "http://localhost:8089/v1",
             "gpt-4", 65536, 10, 600, 30,
-            20, 300, "2026-06-23T00:00:00Z");
+            20, 300, null, null, null, null, "2026-06-23T00:00:00Z");
 
         repo.save(entity);
         var found = repo.findById("test-backend").orElseThrow();
@@ -52,12 +52,12 @@ class BackendConfigRepositoryTest {
     void shouldUpdateOnDuplicateName() {
         var entity = new BackendConfigEntity(
             "dup", "openai", "k1", "u1", "m1", null,
-            5, 5, 5, 5, 60, "t");
+            5, 5, 5, 5, 60, null, null, null, null, "t");
         repo.save(entity);
 
         var updated = new BackendConfigEntity(
             "dup", "anthropic", "k2", "u2", "m2", 100,
-            5, 5, 5, 5, 60, "t");
+            5, 5, 5, 5, 60, null, null, null, null, "t");
         repo.save(updated);
 
         assertThat(repo.count()).isEqualTo(1);
@@ -66,9 +66,9 @@ class BackendConfigRepositoryTest {
 
     @Test
     void shouldFindByNameLikePaged() {
-        repo.save(new BackendConfigEntity("test-openai", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, "t"));
-        repo.save(new BackendConfigEntity("test-gemini", "gemini", "k", "u", "m", null, 5, 5, 5, 5, 60, "t"));
-        repo.save(new BackendConfigEntity("prod-deepseek", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, "t"));
+        repo.save(new BackendConfigEntity("test-openai", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, null, null, null, null, "t"));
+        repo.save(new BackendConfigEntity("test-gemini", "gemini", "k", "u", "m", null, 5, 5, 5, 5, 60, null, null, null, null, "t"));
+        repo.save(new BackendConfigEntity("prod-deepseek", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, null, null, null, null, "t"));
 
         List<BackendConfigEntity> rows = repo.findByNameLikePaged("%test%", 10, 0);
         long total = repo.countByNameLike("%test%");
@@ -80,7 +80,7 @@ class BackendConfigRepositoryTest {
 
     @Test
     void shouldReturnEmptyWhenNameNoMatch() {
-        repo.save(new BackendConfigEntity("test-openai", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, "t"));
+        repo.save(new BackendConfigEntity("test-openai", "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, null, null, null, null, "t"));
 
         List<BackendConfigEntity> rows = repo.findByNameLikePaged("%nonexistent%", 10, 0);
         long total = repo.countByNameLike("%nonexistent%");
@@ -93,7 +93,7 @@ class BackendConfigRepositoryTest {
     void shouldPaginateWithLimitOffset() {
         for (int i = 0; i < 5; i++) {
             repo.save(new BackendConfigEntity(
-                "b" + i, "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, "t"));
+                "b" + i, "openai", "k", "u", "m", null, 5, 5, 5, 5, 60, null, null, null, null, "t"));
         }
 
         // 第 1 页（size=2）：b0, b1
@@ -113,7 +113,7 @@ class BackendConfigRepositoryTest {
         var entity = new BackendConfigEntity(
             "nullable-backend", "openai", null, "http://localhost:8089/v1",
             null, 65536, 10, 600, 30,
-            20, 300, "2026-06-27T00:00:00Z");
+            20, 300, null, null, null, null, "2026-06-27T00:00:00Z");
 
         repo.save(entity);
         var found = repo.findById("nullable-backend").orElseThrow();

@@ -191,4 +191,199 @@ class OpenAiResponseConverterTest {
         assertThat(resp.choices().get(0).message().reasoningContent()).isEqualTo("推理A");
         assertThat(resp.choices().get(1).message().reasoningContent()).isEqualTo("推理B");
     }
+
+    // ===== P1-4: <think> 标签拆分 =====
+
+    @Test
+    void shouldSplitLeadingThinkBlockFromContent() {
+        var sdkResp = ChatCompletion.builder()
+            .id("chatcmpl-think-1")
+            .model("MiniMax-abab6.5")
+            .created(1715000000L)
+            .choices(List.of(
+                ChatCompletion.Choice.builder()
+                    .index(0L)
+                    .finishReason(ChatCompletion.Choice.FinishReason.STOP)
+                    .logprobs(Optional.empty())
+                    .message(ChatCompletionMessage.builder()
+                        .content("<think>我先思考一下</think>最终答案")
+                        .refusal(Optional.empty())
+                        .build())
+                    .build()
+            ))
+            .build();
+
+        UnifiedChatResponse resp = converter.convert(sdkResp);
+
+        UnifiedMessage msg = resp.choices().get(0).message();
+        assertThat(msg.reasoningContent()).isEqualTo("我先思考一下");
+        assertThat(msg.content()).isEqualTo("最终答案");
+    }
+
+    @Test
+    void shouldNotSplitWhenReasoningContentAlreadyPresent() {
+        // 后端原生 reasoning_content 优先,不拆 content
+        var sdkResp = ChatCompletion.builder()
+            .id("chatcmpl-think-2")
+            .model("deepseek-v4")
+            .created(1715000000L)
+            .choices(List.of(
+                ChatCompletion.Choice.builder()
+                    .index(0L)
+                    .finishReason(ChatCompletion.Choice.FinishReason.STOP)
+                    .logprobs(Optional.empty())
+                    .message(ChatCompletionMessage.builder()
+                        .content("<think>should not be split</think>answer")
+                        .refusal(Optional.empty())
+                        .putAdditionalProperty("reasoning_content", JsonValue.from("原生 reasoning"))
+                        .build())
+                    .build()
+            ))
+            .build();
+
+        UnifiedChatResponse resp = converter.convert(sdkResp);
+
+        UnifiedMessage msg = resp.choices().get(0).message();
+        assertThat(msg.reasoningContent()).isEqualTo("原生 reasoning");
+        assertThat(msg.content()).isEqualTo("<think>should not be split</think>answer");
+    }
+
+    @Test
+    void shouldNotSplitWhenNoThinkTag() {
+        var sdkResp = ChatCompletion.builder()
+            .id("chatcmpl-think-3")
+            .model("gpt-4o")
+            .created(1715000000L)
+            .choices(List.of(
+                ChatCompletion.Choice.builder()
+                    .index(0L)
+                    .finishReason(ChatCompletion.Choice.FinishReason.STOP)
+                    .logprobs(Optional.empty())
+                    .message(ChatCompletionMessage.builder()
+                        .content("普通文本,没有 think 标签")
+                        .refusal(Optional.empty())
+                        .build())
+                    .build()
+            ))
+            .build();
+
+        UnifiedChatResponse resp = converter.convert(sdkResp);
+
+        UnifiedMessage msg = resp.choices().get(0).message();
+        assertThat(msg.reasoningContent()).isNull();
+        assertThat(msg.content()).isEqualTo("普通文本,没有 think 标签");
+    }
+
+    @Test
+    void shouldExtractRefusalFromResponse() {
+        var converter = new OpenAiResponseConverter();
+        var msg = ChatCompletionMessage.builder()
+            .role(com.openai.core.JsonValue.from("assistant"))
+            .refusal(java.util.Optional.of("我不能回答这个问题"))
+            .content(java.util.Optional.empty())
+            .build();
+        var sdkResp = ChatCompletion.builder()
+            .id("chatcmpl-1")
+            .model("gpt-4o")
+            .created(100L)
+            .choices(List.of(ChatCompletion.Choice.builder()
+                .index(0L)
+                .message(msg)
+                .finishReason(ChatCompletion.Choice.FinishReason.STOP)
+                .logprobs(Optional.empty())
+                .build()))
+            .build();
+
+        var result = converter.convert(sdkResp);
+        var uMsg = result.choices().get(0).message();
+        assertThat(uMsg.refusal()).isEqualTo("我不能回答这个问题");
+    }
+
+    @Test
+    void shouldExtractAudioFromResponse() throws Exception {
+        var converter = new OpenAiResponseConverter();
+        var audioObj = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+        audioObj.put("id", "audio-1");
+        audioObj.put("format", "wav");
+        var msg = ChatCompletionMessage.builder()
+            .role(com.openai.core.JsonValue.from("assistant"))
+            .refusal(java.util.Optional.empty())
+            .content(java.util.Optional.of("语音回复"))
+            .putAdditionalProperty("audio",
+                com.openai.core.JsonValue.fromJsonNode(audioObj))
+            .build();
+        var sdkResp = ChatCompletion.builder()
+            .id("chatcmpl-1")
+            .model("gpt-4o")
+            .created(100L)
+            .choices(List.of(ChatCompletion.Choice.builder()
+                .index(0L)
+                .message(msg)
+                .finishReason(ChatCompletion.Choice.FinishReason.STOP)
+                .logprobs(Optional.empty())
+                .build()))
+            .build();
+
+        var result = converter.convert(sdkResp);
+        var uMsg = result.choices().get(0).message();
+        assertThat(uMsg.audio()).isNotNull();
+        assertThat(uMsg.audio().path("id").asText("")).isEqualTo("audio-1");
+    }
+
+    @Test
+    void shouldSerializeUsageWithCachedAndReasoningTokens() throws Exception {
+        var adapter = new OpenAiProtocolAdapter();
+        var uResp = UnifiedChatResponse.builder()
+            .id("chatcmpl-1")
+            .model("gpt-4o")
+            .created(100L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .content("hi")
+                    .build())
+                .finishReason("stop")
+                .build()))
+            .usage(UnifiedUsage.builder()
+                .promptTokens(100)
+                .completionTokens(50)
+                .totalTokens(150)
+                .cachedTokens(20)
+                .reasoningTokens(10)
+                .build())
+            .build();
+
+        byte[] out = adapter.fromUnifiedResponse(uResp);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(out);
+        var usage = json.path("usage");
+        assertThat(usage.path("prompt_tokens").asInt()).isEqualTo(100);
+        // prompt_tokens_details 应含 cached_tokens
+        assertThat(usage.path("prompt_tokens_details").path("cached_tokens").asInt()).isEqualTo(20);
+        // completion_tokens_details 应含 reasoning_tokens
+        assertThat(usage.path("completion_tokens_details").path("reasoning_tokens").asInt()).isEqualTo(10);
+    }
+
+    @Test
+    void shouldSerializeRefusalFromIR() throws Exception {
+        var adapter = new OpenAiProtocolAdapter();
+        var uResp = UnifiedChatResponse.builder()
+            .id("chatcmpl-1")
+            .model("gpt-4o")
+            .created(100L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .refusal("拒绝回答")
+                    .build())
+                .finishReason("stop")
+                .build()))
+            .build();
+
+        byte[] out = adapter.fromUnifiedResponse(uResp);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(out);
+        String refusal = json.path("choices").get(0).path("message").path("refusal").asText("");
+        assertThat(refusal).isEqualTo("拒绝回答");
+    }
 }

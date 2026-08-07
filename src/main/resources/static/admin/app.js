@@ -452,6 +452,7 @@ async function promptUpdateClientConfig(clientProtocol) {
 function mapProtocolToClientName(protocol) {
     if (protocol === 'responses') return 'codex';
     if (protocol === 'gemini') return 'gemini-cli';
+    if (protocol === 'anthropic') return 'claude-code';
     return null;
 }
 
@@ -667,6 +668,10 @@ function editBackendRow(btn) {
     document.getElementById('writeTimeout').value = b.writeTimeout;
     document.getElementById('maxIdleConnections').value = b.maxIdleConnections;
     document.getElementById('keepAliveDuration').value = b.keepAliveDuration;
+    document.getElementById('reasoningEffortMode').value = b.reasoningEffortMode || '';
+    document.getElementById('reasoningEffortDefault').value = b.reasoningEffortDefault || '';
+    document.getElementById('thinkingDefaultType').value = b.thinkingDefaultType || '';
+    document.getElementById('thinkingDefaultBudget').value = b.thinkingDefaultBudget || '';
     openBackendModal(true);
 }
 
@@ -708,6 +713,10 @@ if (backendForm) {
             writeTimeout: parseInt(document.getElementById('writeTimeout').value) || 30,
             maxIdleConnections: parseInt(document.getElementById('maxIdleConnections').value) || 20,
             keepAliveDuration: parseInt(document.getElementById('keepAliveDuration').value) || 300,
+            reasoningEffortMode: document.getElementById('reasoningEffortMode').value || null,
+            reasoningEffortDefault: document.getElementById('reasoningEffortDefault').value || null,
+            thinkingDefaultType: document.getElementById('thinkingDefaultType').value || null,
+            thinkingDefaultBudget: parseInt(document.getElementById('thinkingDefaultBudget').value) || null,
             updatedAt: null
         };
         apiCall('/admin/api/backends', 'POST', body)

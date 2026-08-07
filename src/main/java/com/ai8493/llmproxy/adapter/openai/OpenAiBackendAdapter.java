@@ -13,6 +13,7 @@ import com.ai8493.llmproxy.model.UnifiedChatResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
+import reactor.core.scheduler.Schedulers;
 
 public class OpenAiBackendAdapter implements BackendAdapter {
 
@@ -21,6 +22,7 @@ public class OpenAiBackendAdapter implements BackendAdapter {
     private final String backendName;
     private OpenAIClient client;
     private String defaultModel;
+    private BackendConfig config;
 
     public OpenAiBackendAdapter(String backendName) {
         this.backendName = backendName;
@@ -33,13 +35,14 @@ public class OpenAiBackendAdapter implements BackendAdapter {
     public void init(BackendConfig config) {
         this.client = BackendClientFactory.createOpenAiClient(config);
         this.defaultModel = config.defaultModel();
+        this.config = config;
     }
 
     @Override
     public UnifiedChatResponse call(UnifiedChatRequest request) {
         try {
             var reqConverter = new OpenAiRequestConverter();
-            ChatCompletionCreateParams params = reqConverter.convert(request);
+            ChatCompletionCreateParams params = reqConverter.convert(request, config);
             log.debug("{} 后端请求: model={} messages={} tools={}",
                 backendName, params.model().asString(),
                 params.messages().size(), params.tools().map(java.util.List::size).orElse(0));
@@ -58,7 +61,7 @@ public class OpenAiBackendAdapter implements BackendAdapter {
             log.error("{} 后端请求失败: status={} body={}", backendName,
                 e.statusCode(), e.body());
             throw new BackendApiException(backendName, e.statusCode(),
-                "OpenAI API 调用失败: " + e.getMessage());
+                "OpenAI API 调用失败: " + e.getMessage(), String.valueOf(e.body()));
         } catch (Exception e) {
             log.error("{} 后端请求异常: {}", backendName, e.getMessage(), e);
             throw new BackendApiException(backendName, 502,
@@ -68,11 +71,11 @@ public class OpenAiBackendAdapter implements BackendAdapter {
 
     @Override
     public Flux<UnifiedChatResponse> stream(UnifiedChatRequest request) {
-        return Flux.create(sink -> {
+        return Flux.<UnifiedChatResponse>create(sink -> {
             ChatCompletionCreateParams params = null;
             try {
                 var reqConverter = new OpenAiRequestConverter();
-                params = reqConverter.convert(request);
+                params = reqConverter.convert(request, config);
 
                 // 流式请求注入 stream_options.include_usage=true，使后端在最后一个 chunk 返回 usage
                 if (request.stream()) {
@@ -146,18 +149,35 @@ public class OpenAiBackendAdapter implements BackendAdapter {
                     }
                 });
                 log.debug("{} 流式响应完成", backendName);
+                // flush 残留的 <think> 状态 buffer,处理未闭合的 reasoning 块
+                UnifiedChatResponse flushed = respConverter.flush(null, 0L);
+                if (flushed != null && !sink.isCancelled()) {
+                    sink.next(flushed);
+                }
+                // 流截断分类:无 finishReason 时按是否有输出兜底
+                if (!respConverter.isStreamCompleted() && !sink.isCancelled()) {
+                    if (respConverter.hasSubstantiveOutput()) {
+                        log.warn("{} 流式响应被截断: 已有输出但无 finishReason,合成 finish_reason=length", backendName);
+                        sink.next(respConverter.synthesizeIncompleteChunk(null, 0L));
+                    } else {
+                        log.error("{} 流式响应被截断: 无输出且无 finishReason,标记为 stream_truncated", backendName);
+                        sink.error(new BackendApiException(backendName, 502,
+                            "上游流式响应被截断: 无输出且未发送 finish_reason"));
+                        return;
+                    }
+                }
                 sink.complete();
             } catch (OpenAIServiceException e) {
                 log.error("{} 流式请求失败: status={} body={} params={}", backendName,
                     e.statusCode(), e.body(), params);
                 sink.error(new BackendApiException(backendName, e.statusCode(),
-                    "OpenAI API 流式调用失败: " + e.getMessage()));
+                    "OpenAI API 流式调用失败: " + e.getMessage(), String.valueOf(e.body())));
             } catch (Exception e) {
                 log.error("{} 流式请求异常: {}", backendName, e.getMessage(), e);
                 sink.error(new BackendApiException(backendName, 502,
                     "OpenAI API 流式调用失败: " + e.getMessage()));
             }
-        });
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     private static void logRequestParams(String name, ChatCompletionCreateParams params, String label) {
@@ -284,7 +304,7 @@ public class OpenAiBackendAdapter implements BackendAdapter {
             log.error("{} 获取模型列表失败: status={} body={}", backendName,
                 e.statusCode(), e.body());
             throw new com.ai8493.llmproxy.exception.BackendApiException(backendName, e.statusCode(),
-                "OpenAI 模型列表获取失败: " + e.getMessage());
+                "OpenAI 模型列表获取失败: " + e.getMessage(), String.valueOf(e.body()));
         } catch (Exception e) {
             log.error("{} 获取模型列表异常: {}", backendName, e.getMessage(), e);
             throw new com.ai8493.llmproxy.exception.BackendApiException(backendName, 502,

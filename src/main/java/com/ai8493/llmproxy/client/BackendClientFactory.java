@@ -147,7 +147,7 @@ public class BackendClientFactory {
                         .append(" (").append(tookMs).append("ms)\n");
                 resp.headers().forEach(h -> respLine.append(h.component1())
                                                     .append(": ").append(h.component2()).append('\n'));
-                if (resp.body() != null) {
+                if (resp.body() != null && !isStreamingResponse(resp)) {
                     var bodyStr = resp.peekBody(Long.MAX_VALUE).string();
                     respLine.append(bodyStr);
                 }
@@ -155,6 +155,15 @@ public class BackendClientFactory {
             }
 
             return resp;
+        }
+
+        private static boolean isStreamingResponse(Response resp) {
+            var contentType = resp.header("Content-Type");
+            if (contentType != null && contentType.toLowerCase().contains("text/event-stream")) {
+                return true;
+            }
+            var transferEncoding = resp.header("Transfer-Encoding");
+            return transferEncoding != null && transferEncoding.toLowerCase().contains("chunked");
         }
     }
 

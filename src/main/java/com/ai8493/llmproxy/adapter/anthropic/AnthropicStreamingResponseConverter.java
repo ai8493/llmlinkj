@@ -36,7 +36,11 @@ public class AnthropicStreamingResponseConverter {
     private int inputTokens;
     private int outputTokens;
     private int cachedTokens;
+    private int cacheCreationTokens;
     private String stopReason;
+
+    // 流截断分类:跟踪是否已收到 stopReason + 是否有实质性输出
+    private boolean hasSubstantiveOutput;
 
     private final String chunkId;
 
@@ -98,7 +102,8 @@ public class AnthropicStreamingResponseConverter {
             blockTextBufs.put(index, new StringBuilder(initial));
             log.debug("流式 redacted_thinking block_start: index={} thinking={}", index, initial);
             if (!initial.isEmpty()) {
-                return buildChunk(new UnifiedDelta(null, null, null, initial), null);
+                hasSubstantiveOutput = true;
+                return buildChunk(UnifiedDelta.builder().reasoningContent(initial).build(), null);
             }
             return emptyChunk();
         }
@@ -109,9 +114,16 @@ public class AnthropicStreamingResponseConverter {
             toolUseNames.put(index, tu.name());
             toolUseArgsBufs.put(index, new StringBuilder());
             toolUseInitialInputs.put(index, tu._input());
-            var tc = new UnifiedToolCall(tu.id(), "function",
-                new UnifiedFunctionCall(tu.name(), null));
-            return buildChunk(new UnifiedDelta(null, null, List.of(tc), null), null);
+            hasSubstantiveOutput = true;
+            var tc = UnifiedToolCall.builder()
+                    .index(index)  // 传 index 给下游,支持多 toolCall 按 index 区分
+                    .id(tu.id())
+                    .type("function")
+                    .function(UnifiedFunctionCall.builder()
+                            .name(tu.name())
+                            .build())
+                    .build();
+            return buildChunk(UnifiedDelta.builder().toolCalls(List.of(tc)).build(), null);
         }
         log.debug("流式 block_start 未处理类型: index={} type={}", index, contentBlock);
         return emptyChunk();
@@ -124,11 +136,13 @@ public class AnthropicStreamingResponseConverter {
         if (delta.isText()) {
             String text = delta.asText().text();
             appendBlockText(index, text);
-            return buildChunk(new UnifiedDelta(null, text, null, null), null);
+            hasSubstantiveOutput = true;
+            return buildChunk(UnifiedDelta.builder().content(text).build(), null);
         } else if (delta.isThinking()) {
             String thinking = delta.asThinking().thinking();
             appendBlockText(index, thinking);
-            return buildChunk(new UnifiedDelta(null, null, null, thinking), null);
+            hasSubstantiveOutput = true;
+            return buildChunk(UnifiedDelta.builder().reasoningContent(thinking).build(), null);
         } else if (delta.isInputJson()) {
             // 仅累积到 buffer，在 messageStop 时一次性发送完整 tool_calls
             String partialJson = delta.asInputJson().partialJson();
@@ -144,7 +158,9 @@ public class AnthropicStreamingResponseConverter {
         } else if (delta.isSignature()) {
             String sig = delta.asSignature().signature();
             appendBlockText(index, sig);
-            return emptyChunk();
+            // signature 透传到 UnifiedDelta.thinkingSignature(支持多轮续接)
+            hasSubstantiveOutput = true;
+            return buildChunk(UnifiedDelta.builder().thinkingSignature(sig).build(), null);
         }
         // 其他 delta 类型（citations, signature 等），IR 暂无对应字段
         String deltaVariant = delta.isCitations() ? "citations"
@@ -168,24 +184,12 @@ public class AnthropicStreamingResponseConverter {
             this.inputTokens = usage.inputTokens().get().intValue();
         }
         this.outputTokens = (int) usage.outputTokens();
-        if (usage.cacheReadInputTokens().isPresent()) {
-            this.cachedTokens = usage.cacheReadInputTokens().get().intValue();
-        } else if (usage.cacheCreationInputTokens().isPresent()) {
-            this.cachedTokens = usage.cacheCreationInputTokens().get().intValue();
-        }
-        // 记录真实 stopReason，避免 messageStop 硬编码
-        md.delta().stopReason().ifPresent(r -> this.stopReason = mapStopReason(r));
+        // cache_read 和 cache_creation 并存(非互斥,与响应侧 Task 6 一致)
+        this.cachedTokens = usage.cacheReadInputTokens().map(Long::intValue).orElse(this.cachedTokens);
+        this.cacheCreationTokens = usage.cacheCreationInputTokens().map(Long::intValue).orElse(this.cacheCreationTokens);
+        // 记录真实 stopReason(Anthropic 原值,spec 第 5 节),避免 messageStop 硬编码
+        md.delta().stopReason().ifPresent(r -> this.stopReason = r.asString());
         return emptyChunk();
-    }
-
-    private static String mapStopReason(StopReason r) {
-        if (r.known() == null) return "stop";
-        return switch (r.known()) {
-            case END_TURN, STOP_SEQUENCE, TOOL_USE -> "stop";
-            case MAX_TOKENS -> "length";
-            case REFUSAL -> "content_filter";
-            default -> "stop";
-        };
     }
 
     private UnifiedChatResponse handleMessageStop() {
@@ -239,31 +243,46 @@ public class AnthropicStreamingResponseConverter {
                     log.debug("流式 tool_use 使用空参数兜底: name={} id={}", tuName, tuId);
                 }
             }
-            toolCalls.add(new UnifiedToolCall(
-                    tuId, "function",
-                    new UnifiedFunctionCall(tuName, args)
-            ));
+            toolCalls.add(UnifiedToolCall.builder()
+                    .index(idx)  // 传 index 给下游,支持多 toolCall 按 index 区分
+                    .id(tuId)
+                    .type("function")
+                    .function(UnifiedFunctionCall.builder()
+                            .name(tuName)
+                            .arguments(args)
+                            .build())
+                    .build());
         }
 
         // content/reasoningContent 置 null：它们已在 handleContentBlockDelta 中逐段流式输出
-        UnifiedDelta finalDelta = new UnifiedDelta(
-                null,
-                null,
-                (toolCalls != null && !toolCalls.isEmpty()) ? toolCalls : null,
-                null
-        );
+        UnifiedDelta finalDelta = UnifiedDelta.builder()
+                .toolCalls((toolCalls != null && !toolCalls.isEmpty()) ? toolCalls : null)
+                .build();
 
         int totalTokens = inputTokens + outputTokens;
-        UnifiedUsage usage = new UnifiedUsage(inputTokens, outputTokens, totalTokens, cachedTokens, 0);
+        UnifiedUsage usage = UnifiedUsage.builder()
+                .promptTokens(inputTokens)
+                .completionTokens(outputTokens)
+                .totalTokens(totalTokens)
+                .cachedTokens(cachedTokens)
+                .cacheCreationTokens(cacheCreationTokens)
+                .build();
 
         String id = msgId != null ? msgId : chunkId;
         String m = model != null ? model : "unknown";
         String finishReason = this.stopReason != null ? this.stopReason : "stop";
-        return new UnifiedChatResponse(
-                id, m, "chat.completion.chunk", createdAt,
-                List.of(new UnifiedChoice(0, null, finalDelta, finishReason, null)),
-                usage, null
-        );
+        return UnifiedChatResponse.builder()
+                .id(id)
+                .model(m)
+                .object("chat.completion.chunk")
+                .created(createdAt)
+                .choices(List.of(UnifiedChoice.builder()
+                        .index(0)
+                        .delta(finalDelta)
+                        .finishReason(finishReason)
+                        .build()))
+                .usage(usage)
+                .build();
     }
 
     // ====== 辅助方法 ======
@@ -281,21 +300,53 @@ public class AnthropicStreamingResponseConverter {
     private UnifiedChatResponse buildChunk(UnifiedDelta delta, String finishReason) {
         String id = msgId != null ? msgId : chunkId;
         String m = model != null ? model : "unknown";
-        return new UnifiedChatResponse(
-                id, m, "chat.completion.chunk", createdAt,
-                List.of(new UnifiedChoice(0, null, delta, finishReason, null)),
-                null, null
-        );
+        return UnifiedChatResponse.builder()
+                .id(id)
+                .model(m)
+                .object("chat.completion.chunk")
+                .created(createdAt)
+                .choices(List.of(UnifiedChoice.builder()
+                        .index(0)
+                        .delta(delta)
+                        .finishReason(finishReason)
+                        .build()))
+                .build();
     }
 
     private UnifiedChatResponse emptyChunk() {
-        return new UnifiedChatResponse(
-                msgId != null ? msgId : chunkId,
-                model != null ? model : "unknown",
-                "chat.completion.chunk",
-                createdAt,
-                List.of(),
-                null, null
-        );
+        return UnifiedChatResponse.builder()
+                .id(msgId != null ? msgId : chunkId)
+                .model(model != null ? model : "unknown")
+                .object("chat.completion.chunk")
+                .created(createdAt)
+                .choices(List.of())
+                .build();
+    }
+
+    // 流截断分类:是否已收到 stopReason(从 messageDelta)
+    public boolean isStreamCompleted() {
+        return stopReason != null;
+    }
+
+    // 流截断分类:是否有实质性输出(content/thinking/toolCalls)
+    public boolean hasSubstantiveOutput() {
+        return hasSubstantiveOutput;
+    }
+
+    // 合成 incomplete 兜底 chunk:有输出但无 stopReason,标记 finish_reason=length
+    public UnifiedChatResponse synthesizeIncompleteChunk() {
+        UnifiedDelta delta = UnifiedDelta.builder().build();
+        UnifiedChoice choice = UnifiedChoice.builder()
+            .index(0)
+            .delta(delta)
+            .finishReason("length")
+            .build();
+        return UnifiedChatResponse.builder()
+            .id(msgId != null ? msgId : chunkId)
+            .model(model != null ? model : "unknown")
+            .object("chat.completion.chunk")
+            .created(createdAt)
+            .choices(List.of(choice))
+            .build();
     }
 }

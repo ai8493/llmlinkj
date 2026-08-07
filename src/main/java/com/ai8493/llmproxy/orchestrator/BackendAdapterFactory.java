@@ -4,6 +4,7 @@ import com.ai8493.llmproxy.adapter.BackendAdapter;
 import com.ai8493.llmproxy.adapter.gemini.GeminiBackendAdapter;
 import com.ai8493.llmproxy.adapter.anthropic.AnthropicBackendAdapter;
 import com.ai8493.llmproxy.adapter.openai.OpenAiBackendAdapter;
+import com.ai8493.llmproxy.adapter.openai.OpenAiResponsesBackendAdapter;
 import com.ai8493.llmproxy.config.BackendConfig;
 import com.ai8493.llmproxy.config.entity.BackendConfigEntity;
 import com.ai8493.llmproxy.config.repository.BackendConfigRepository;
@@ -35,6 +36,7 @@ public class BackendAdapterFactory {
                 case "gemini" -> new GeminiBackendAdapter(k);
                 case "openai" -> new OpenAiBackendAdapter(k);
                 case "anthropic" -> new AnthropicBackendAdapter(k);
+                case "openai-responses" -> new OpenAiResponsesBackendAdapter(k);
                 default -> throw new IllegalArgumentException("未知协议: " + entity.protocol());
             };
             adapter.init(config);
@@ -67,6 +69,11 @@ public class BackendAdapterFactory {
             Duration.ofSeconds(e.writeTimeout()),
             new BackendConfig.PoolConfig(
                 e.maxIdleConnections(),
-                Duration.ofSeconds(e.keepAliveDuration())));
+                Duration.ofSeconds(e.keepAliveDuration())),
+            new BackendConfig.ReasoningConfig(
+                e.reasoningEffortMode(),
+                e.reasoningEffortDefault(),
+                e.thinkingDefaultType(),
+                e.thinkingDefaultBudget()));
     }
 }

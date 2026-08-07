@@ -26,8 +26,15 @@ class ToolMapperTest {
         properties.set("location", location);
         params.set("properties", properties);
 
-        var fnDef = new UnifiedFunctionDefinition("get_weather", "获取天气", params);
-        var irTool = new UnifiedTool("function", fnDef);
+        var fnDef = UnifiedFunctionDefinition.builder()
+            .name("get_weather")
+            .description("获取天气")
+            .parameters(params)
+            .build();
+        var irTool = UnifiedTool.builder()
+            .type("function")
+            .function(fnDef)
+            .build();
 
         var result = mapper.mapTools(List.of(irTool));
 
@@ -44,7 +51,7 @@ class ToolMapperTest {
 
     @Test
     void shouldMapNoneToolChoice() {
-        var result = mapper.mapToolChoice(new UnifiedToolChoice.None());
+        var result = mapper.mapToolChoice(UnifiedToolChoice.None.builder().build());
 
         assertThat(result).isNotNull();
         assertThat(result.functionCallingConfig()).isPresent();
@@ -53,7 +60,7 @@ class ToolMapperTest {
 
     @Test
     void shouldMapAutoToolChoice() {
-        var result = mapper.mapToolChoice(new UnifiedToolChoice.Auto());
+        var result = mapper.mapToolChoice(UnifiedToolChoice.Auto.builder().build());
 
         assertThat(result).isNotNull();
         assertThat(result.functionCallingConfig()).isPresent();
@@ -62,7 +69,9 @@ class ToolMapperTest {
 
     @Test
     void shouldMapRequiredToolChoice() {
-        var result = mapper.mapToolChoice(new UnifiedToolChoice.Required("get_weather"));
+        var result = mapper.mapToolChoice(UnifiedToolChoice.Required.builder()
+            .functionName("get_weather")
+            .build());
 
         assertThat(result).isNotNull();
         assertThat(result.functionCallingConfig()).isPresent();

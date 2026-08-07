@@ -21,11 +21,14 @@ public class FunctionCallMapper {
                 if (fc.args().isPresent()) {
                     argsNode = mapper.valueToTree(fc.args().get());
                 }
-                return new UnifiedToolCall(
-                    fc.id().orElse(null),
-                    "function",
-                    new UnifiedFunctionCall(fc.name().orElse(""), argsNode)
-                );
+                return UnifiedToolCall.builder()
+                    .id(fc.id().orElse(null))
+                    .type("function")
+                    .function(UnifiedFunctionCall.builder()
+                        .name(fc.name().orElse(""))
+                        .arguments(argsNode)
+                        .build())
+                    .build();
             })
             .toList();
     }

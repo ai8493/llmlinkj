@@ -43,8 +43,14 @@ class GeminiToOpenAiConversionTest {
 
     private UnifiedChatRequest geminiToIR(byte[] raw) {
         UnifiedChatRequest ir = geminiAdapter.toUnifiedRequest(raw, Map.of());
-        return new UnifiedChatRequest(TEST_MODEL, ir.messages(), ir.config(),
-            ir.tools(), ir.toolChoice(), ir.stream());
+        return UnifiedChatRequest.builder()
+            .model(TEST_MODEL)
+            .messages(ir.messages())
+            .config(ir.config())
+            .tools(ir.tools())
+            .toolChoice(ir.toolChoice())
+            .stream(ir.stream())
+            .build();
     }
 
     // ================================================================
@@ -359,25 +365,33 @@ class GeminiToOpenAiConversionTest {
     class StreamingConversion {
 
         @Test
-        @DisplayName("流式工具调用累积：id/name/args 正确组装")
+        @DisplayName("流式工具调用真流式:id/name 与 args 增量分别输出")
         void streamingToolCallAccumulation() {
             var converter = new OpenAiStreamingResponseConverter("gpt-4");
 
             var optEmpty = java.util.Optional.<ChatCompletionChunk.Choice.FinishReason>empty();
 
-            converter.convertChunk(choiceChunk(0L, optEmpty,
+            // chunk1: id + name → 输出 delta.toolCalls(arguments=null),无 argumentDelta
+            UnifiedChatResponse ir1 = converter.convertChunk(choiceChunk(0L, optEmpty,
                 deltaWithToolCall(0L, "call_001", "run_shell_command", null)));
-            converter.convertChunk(choiceChunk(0L, optEmpty,
+            assertThat(ir1.choices().get(0).delta().toolCalls()).hasSize(1);
+            assertThat(ir1.choices().get(0).delta().toolCalls().get(0).id()).isEqualTo("call_001");
+            assertThat(ir1.choices().get(0).delta().toolCalls().get(0).function().name()).isEqualTo("run_shell_command");
+            assertThat(ir1.choices().get(0).delta().toolCalls().get(0).function().arguments()).isNull();
+            assertThat(ir1.choices().get(0).delta().toolCallArgumentDeltas()).isNull();
+
+            // chunk2: arguments 增量 → 输出 toolCallArgumentDeltas,无 toolCalls
+            UnifiedChatResponse ir2 = converter.convertChunk(choiceChunk(0L, optEmpty,
                 deltaWithToolCall(0L, null, null, "{\"command\": \"java -version\"}")));
+            assertThat(ir2.choices().get(0).delta().toolCallArgumentDeltas().get(0).partialJson()).isEqualTo("{\"command\": \"java -version\"}");
+            assertThat(ir2.choices().get(0).delta().toolCalls()).isNull();
 
-            UnifiedChatResponse assembled = converter.convertChunk(choiceChunk(0L,
+            // chunk3: finishReason → 清空累积器,delta 无 toolCalls 无 argumentDelta
+            UnifiedChatResponse ir3 = converter.convertChunk(choiceChunk(0L,
                 Optional.of(ChatCompletionChunk.Choice.FinishReason.TOOL_CALLS), emptyDelta()));
-
-            var tc = assembled.choices().get(0).delta().toolCalls().get(0);
-            assertThat(tc.id()).isEqualTo("call_001");
-            assertThat(tc.function().name()).isEqualTo("run_shell_command");
-            assertThat(tc.function().arguments().get("command").asText())
-                .isEqualTo("java -version");
+            assertThat(ir3.choices().get(0).finishReason()).isEqualTo("tool_calls");
+            assertThat(ir3.choices().get(0).delta().toolCalls()).isNull();
+            assertThat(ir3.choices().get(0).delta().toolCallArgumentDeltas()).isNull();
         }
 
         @Test
@@ -385,14 +399,19 @@ class GeminiToOpenAiConversionTest {
         void streamingIRToGeminiSSEWithFunctionCall() throws Exception {
             var converter = new OpenAiStreamingResponseConverter("gpt-4");
             var optEmpty = java.util.Optional.<ChatCompletionChunk.Choice.FinishReason>empty();
+            var ctx = new com.ai8493.llmproxy.adapter.gemini.GeminiRequestContext("test-session");
 
-            converter.convertChunk(choiceChunk(0L, optEmpty,
+            // chunk1: id + name + 完整 args → OSRC 输出 toolCalls(args=null) + argumentDelta
+            UnifiedChatResponse ir1 = converter.convertChunk(choiceChunk(0L, optEmpty,
                 deltaWithToolCall(0L, "call_abc", "run_shell_command",
                     "{\"command\":\"java -version\",\"dir_path\":\"D:\\\\AI\\\\gemini-work\"}")));
-            UnifiedChatResponse ir = converter.convertChunk(choiceChunk(0L,
-                Optional.of(ChatCompletionChunk.Choice.FinishReason.TOOL_CALLS), emptyDelta()));
+            geminiAdapter.fromUnifiedStreamChunk(ir1, ctx);
 
-            String sse = geminiAdapter.fromUnifiedStreamChunk(ir);
+            // chunk2: finishReason → 出站侧累积 argumentDelta,组装完整 functionCall
+            UnifiedChatResponse ir2 = converter.convertChunk(choiceChunk(0L,
+                Optional.of(ChatCompletionChunk.Choice.FinishReason.TOOL_CALLS), emptyDelta()));
+            String sse = geminiAdapter.fromUnifiedStreamChunk(ir2, ctx);
+
             JsonNode sseJson = mapper.readTree(sse);
 
             JsonNode fc = sseJson.get("candidates").get(0)
@@ -401,6 +420,30 @@ class GeminiToOpenAiConversionTest {
             assertThat(fc.has("id")).isTrue();
             assertThat(fc.get("args").get("command").asText()).isEqualTo("java -version");
             assertThat(fc.get("args").get("dir_path").asText()).isEqualTo("D:\\AI\\gemini-work");
+        }
+
+        @Test
+        @DisplayName("流式多 toolCall 并行 - 按 index 区分不互相覆盖(端到端验证 index 传播)")
+        void streamingMultipleToolCallsParallel() {
+            var converter = new OpenAiStreamingResponseConverter("gpt-4");
+            var optEmpty = java.util.Optional.<ChatCompletionChunk.Choice.FinishReason>empty();
+            var ctx = new com.ai8493.llmproxy.adapter.gemini.GeminiRequestContext("test-multi");
+
+            // chunk1: toolCall index=0, id=call_1, name=get_weather
+            UnifiedChatResponse ir1 = converter.convertChunk(choiceChunk(0L, optEmpty,
+                deltaWithToolCall(0L, "call_1", "get_weather", null)));
+            geminiAdapter.fromUnifiedStreamChunk(ir1, ctx);
+
+            // chunk2: toolCall index=1, id=call_2, name=get_time
+            UnifiedChatResponse ir2 = converter.convertChunk(choiceChunk(0L, optEmpty,
+                deltaWithToolCall(1L, "call_2", "get_time", null)));
+            geminiAdapter.fromUnifiedStreamChunk(ir2, ctx);
+
+            // 验证:OSRC 已传 .index(tcIndex)(Critical #1 修复),Gemini 出站按 index 累积
+            // ctx 有 2 个 acc(不再 fallback 到 index=0 互相覆盖),keySet 含 0 和 1
+            // id/name 字段验证由同包的 GeminiProtocolAdapterContextTest 覆盖(字段 package-private)
+            assertThat(ctx.toolCallAccs()).hasSize(2);
+            assertThat(ctx.toolCallAccs().keySet()).containsExactly(0, 1);
         }
     }
 

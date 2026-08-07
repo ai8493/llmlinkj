@@ -10,7 +10,8 @@ public class ToolRemapContext {
 
     public enum Kind { APPLY_PATCH, RAW }
 
-    public record CustomSpec(String originalName, Kind kind) {}
+    // P3-14: 保留原始 description 用于响应侧还原
+    public record CustomSpec(String originalName, Kind kind, String originalDescription) {}
 
     public record NamespaceSpec(String originalName, String namespace) {}
 
@@ -37,7 +38,11 @@ public class ToolRemapContext {
     }
 
     void putCustom(String proxyName, String originalName, Kind kind) {
-        customTools.put(proxyName, new CustomSpec(originalName, kind));
+        customTools.put(proxyName, new CustomSpec(originalName, kind, null));
+    }
+
+    void putCustom(String proxyName, String originalName, Kind kind, String originalDescription) {
+        customTools.put(proxyName, new CustomSpec(originalName, kind, originalDescription));
     }
 
     void putNamespace(String flatName, String originalName, String namespace) {

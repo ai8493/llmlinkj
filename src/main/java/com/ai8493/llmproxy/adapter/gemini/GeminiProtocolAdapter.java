@@ -8,21 +8,21 @@ import com.google.genai.types.*;
 import com.ai8493.llmproxy.adapter.ProtocolAdapter;
 import com.ai8493.llmproxy.converter.ToolMapper;
 import com.ai8493.llmproxy.exception.BackendApiException;
+import com.ai8493.llmproxy.exception.TransformException;
 import com.ai8493.llmproxy.model.*;
+import com.ai8493.llmproxy.model.extensions.GeminiExtensions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import java.util.*;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import com.ai8493.llmproxy.cache.ReasoningStore;
 
 /**
  * Gemini 协议适配器：转换 Gemini GenerateContentParameters ↔ IR (UnifiedChatRequest/Response)。
- *
- * <p>注意：Lombok 1.18.46 的 @Builder 在 JDK 25 的记录(record)上不生成 builder() 方法，
- * 因此直接使用记录规范构造函数构造 IR 对象。
  */
 @Component
 public class GeminiProtocolAdapter implements ProtocolAdapter {
@@ -37,7 +37,6 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
     private final ToolMapper toolMapper = new ToolMapper();
 
     private final ReasoningStore reasoningStore;
-    private final ThreadLocal<String> currentSessionKey = new ThreadLocal<>();
 
     /** 无参构造器，供测试使用（自动创建默认 ReasoningStore） */
     public GeminiProtocolAdapter() {
@@ -58,10 +57,11 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
             // 先从 raw JSON 提取这些字段
             JsonNode root = mapper.readTree(rawRequest);
 
-            // Gemini CLI 在 functionCall 类型的 part 上注入 thoughtSignature 纯字符串，
-            // 但 GenAI SDK 的 Part.thoughtSignature 定义为 byte[]（base64），
-            // 直接反序列化会失败。此处移除后不影响代理转发。
-            stripThoughtSignatures(root);
+            // thoughtSignature 原为 byte[] 类型,Gemini CLI 注入字符串形式会导致 SDK 反序列化失败。
+            // 先从 raw JSON 提取 thoughtSignature 到独立映射,再从 parts 移除该字段(避免 SDK 反序列化失败),
+            // 后续在 mapContentToMessages 里填入 UnifiedMessage.thinkingSignature。
+            Map<Integer, String> thoughtSignatures = extractThoughtSignatures(root);
+            removeThoughtSignatureFields(root);
 
             String extraSysInstruction = extractSystemInstruction(root);
             List<UnifiedTool> extraTools = extractTools(root);
@@ -69,7 +69,7 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
 
             GenerateContentParameters req = mapper.readValue(
                 mapper.writeValueAsBytes(root), GenerateContentParameters.class);
-            UnifiedChatRequest unifiedReq = toUnifiedRequest(req, extraSysInstruction, extraTools, extraConfig);
+            UnifiedChatRequest unifiedReq = toUnifiedRequest(req, extraSysInstruction, extraTools, extraConfig, thoughtSignatures);
 
             // ---- 从缓存注入 reasoning_content ----
             String sessionKey = extractSessionKey(headers, root);
@@ -83,20 +83,54 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
                     if (m.role() == UnifiedMessage.Role.ASSISTANT
                             && (m.reasoningContent() == null || m.reasoningContent().isEmpty())) {
                         if (cachedReasoning != null) {
-                            msgs.set(i, new UnifiedMessage(m.role(), m.content(),
-                                m.parts(), m.toolCalls(), m.toolCallId(), m.name(),
-                                cachedReasoning));
+                            msgs.set(i, UnifiedMessage.builder()
+                                .role(m.role())
+                                .content(m.content())
+                                .parts(m.parts())
+                                .toolCalls(m.toolCalls())
+                                .toolCallId(m.toolCallId())
+                                .name(m.name())
+                                .reasoningContent(cachedReasoning)
+                                .build());
                         } else if (isDeepseek) {
-                            msgs.set(i, new UnifiedMessage(m.role(), m.content(),
-                                m.parts(), m.toolCalls(), m.toolCallId(), m.name(),
-                                ""));
+                            msgs.set(i, UnifiedMessage.builder()
+                                .role(m.role())
+                                .content(m.content())
+                                .parts(m.parts())
+                                .toolCalls(m.toolCalls())
+                                .toolCallId(m.toolCallId())
+                                .name(m.name())
+                                .reasoningContent("")
+                                .build());
                         } else {
-                            msgs.set(i, new UnifiedMessage(m.role(), m.content(),
-                                    m.parts(), m.toolCalls(), m.toolCallId(), m.name(),
-                                    ""));
+                            msgs.set(i, UnifiedMessage.builder()
+                                .role(m.role())
+                                .content(m.content())
+                                .parts(m.parts())
+                                .toolCalls(m.toolCalls())
+                                .toolCallId(m.toolCallId())
+                                .name(m.name())
+                                .reasoningContent("")
+                                .build());
                         }
                     }
                 }
+            }
+
+            // ---- 从 raw JSON 读 Gemini 专属字段,填 GeminiExtensions ----
+            GeminiExtensions geminiExt = extractGeminiExtensions(root);
+            if (geminiExt != null) {
+                unifiedReq = UnifiedChatRequest.builder()
+                    .model(unifiedReq.model())
+                    .messages(unifiedReq.messages())
+                    .config(unifiedReq.config())
+                    .tools(unifiedReq.tools())
+                    .toolChoice(unifiedReq.toolChoice())
+                    .stream(unifiedReq.stream())
+                    .anthropic(unifiedReq.anthropic())
+                    .openai(unifiedReq.openai())
+                    .gemini(geminiExt)
+                    .build();
             }
 
             return unifiedReq;
@@ -105,8 +139,27 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
         }
     }
 
-    /** 移除所有 parts 中的 thoughtSignature 字段 */
-    private void stripThoughtSignatures(JsonNode root) {
+    /** 提取所有 thought part 的 thoughtSignature,按 content 索引聚合(同 content 多 signature 用换行拼接) */
+    private Map<Integer, String> extractThoughtSignatures(JsonNode root) {
+        Map<Integer, String> result = new HashMap<>();
+        if (!root.has("contents") || !root.get("contents").isArray()) return result;
+        for (int ci = 0; ci < root.get("contents").size(); ci++) {
+            JsonNode content = root.get("contents").get(ci);
+            if (!content.has("parts") || !content.get("parts").isArray()) continue;
+            StringBuilder sb = new StringBuilder();
+            for (JsonNode part : content.get("parts")) {
+                if (part.isObject() && part.has("thoughtSignature")) {
+                    if (!sb.isEmpty()) sb.append("\n");
+                    sb.append(part.get("thoughtSignature").asText());
+                }
+            }
+            if (!sb.isEmpty()) result.put(ci, sb.toString());
+        }
+        return result;
+    }
+
+    /** 移除所有 parts 中的 thoughtSignature 字段(SDK 反序列化需要) */
+    private void removeThoughtSignatureFields(JsonNode root) {
         if (!root.has("contents") || !root.get("contents").isArray()) return;
         for (JsonNode content : root.get("contents")) {
             if (content.has("parts") && content.get("parts").isArray()) {
@@ -146,14 +199,44 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
             stopSequences = new ArrayList<>();
             for (JsonNode s : gc.get("stopSequences")) stopSequences.add(s.asText());
         }
-        return new UnifiedGenerationConfig(temperature, topP, maxOutputTokens, stopSequences, null, null, null, null);
+        return UnifiedGenerationConfig.builder()
+            .temperature(temperature)
+            .topP(topP)
+            .maxOutputTokens(maxOutputTokens)
+            .stopSequences(stopSequences)
+            .build();
+    }
+
+    /** 从 raw JSON 提取 Gemini 专属字段（responseMimeType/responseSchema/candidateCount/safetySettings） */
+    private GeminiExtensions extractGeminiExtensions(JsonNode root) {
+        JsonNode gcNode = root.path("generationConfig");
+        boolean hasGeminiExt = gcNode.has("responseMimeType")
+            || gcNode.has("responseSchema")
+            || gcNode.has("candidateCount")
+            || root.has("safetySettings");
+        if (!hasGeminiExt) return null;
+        GeminiExtensions.Builder extBuilder = GeminiExtensions.builder();
+        if (gcNode.has("responseMimeType")) {
+            extBuilder.responseMimeType(gcNode.get("responseMimeType").asText());
+        }
+        if (gcNode.has("responseSchema")) {
+            extBuilder.responseSchema(gcNode.get("responseSchema"));
+        }
+        if (gcNode.has("candidateCount")) {
+            extBuilder.candidateCount(gcNode.get("candidateCount").asInt());
+        }
+        if (root.has("safetySettings")) {
+            extBuilder.safetySettings(root.get("safetySettings"));
+        }
+        return extBuilder.build();
     }
 
     /** Type-safe entry point: Google GenAI SDK GenerateContentParameters → IR */
     public UnifiedChatRequest toUnifiedRequest(GenerateContentParameters req,
                                                 String extraSysInstruction,
                                                 List<UnifiedTool> extraTools,
-                                                UnifiedGenerationConfig extraConfig) {
+                                                UnifiedGenerationConfig extraConfig,
+                                                Map<Integer, String> thoughtSignatures) {
         // ---- messages ----
         List<Content> contents = req.contents().orElse(List.of());
         List<UnifiedMessage> messages = new ArrayList<>();
@@ -204,9 +287,10 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
             // 非 model Content：flush 残留 reasoning，重置状态
             if (!"model".equals(geminiRole)) {
                 if (!pendingReasoning.isEmpty() && !reasoningMerged) {
-                    messages.add(new UnifiedMessage(UnifiedMessage.Role.ASSISTANT,
-                        null, null, null, null, null,
-                        String.join("\n", pendingReasoning)));
+                    messages.add(UnifiedMessage.builder()
+                        .role(UnifiedMessage.Role.ASSISTANT)
+                        .reasoningContent(String.join("\n", pendingReasoning))
+                        .build());
                 }
                 pendingReasoning.clear();
                 reasoningMerged = false;
@@ -216,15 +300,51 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
 
             // model Content（含 text/functionCall）：将 pending reasoning 合入
             // 自身没有 reasoning 的 assistant 消息（不清空 pending，让后续 Content 也能携带）
+            String signature = thoughtSignatures != null ? thoughtSignatures.get(i) : null;
             if (!pendingReasoning.isEmpty()) {
                 String rc = String.join("\n", pendingReasoning);
                 for (int j = 0; j < msgs.size(); j++) {
                     UnifiedMessage m = msgs.get(j);
                     if (m.role() == UnifiedMessage.Role.ASSISTANT
                             && m.reasoningContent() == null) {
-                        msgs.set(j, new UnifiedMessage(m.role(), m.content(), m.parts(),
-                            m.toolCalls(), m.toolCallId(), m.name(), rc));
+                        msgs.set(j, UnifiedMessage.builder()
+                            .role(m.role())
+                            .content(m.content())
+                            .parts(m.parts())
+                            .toolCalls(m.toolCalls())
+                            .toolCallId(m.toolCallId())
+                            .name(m.name())
+                            .reasoningContent(rc)
+                            .thinkingSignature(signature != null ? signature : m.thinkingSignature())
+                            .build());
                         reasoningMerged = true;
+                    } else if (m.role() == UnifiedMessage.Role.ASSISTANT && signature != null) {
+                        msgs.set(j, UnifiedMessage.builder()
+                            .role(m.role())
+                            .content(m.content())
+                            .parts(m.parts())
+                            .toolCalls(m.toolCalls())
+                            .toolCallId(m.toolCallId())
+                            .name(m.name())
+                            .reasoningContent(m.reasoningContent())
+                            .thinkingSignature(signature)
+                            .build());
+                    }
+                }
+            } else if (signature != null) {
+                for (int j = 0; j < msgs.size(); j++) {
+                    UnifiedMessage m = msgs.get(j);
+                    if (m.role() == UnifiedMessage.Role.ASSISTANT && m.thinkingSignature() == null) {
+                        msgs.set(j, UnifiedMessage.builder()
+                            .role(m.role())
+                            .content(m.content())
+                            .parts(m.parts())
+                            .toolCalls(m.toolCalls())
+                            .toolCallId(m.toolCallId())
+                            .name(m.name())
+                            .reasoningContent(m.reasoningContent())
+                            .thinkingSignature(signature)
+                            .build());
                     }
                 }
             }
@@ -233,9 +353,10 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
         }
         // 末尾 flush 残留 reasoning（如对话以 thought-only 结尾）
         if (!pendingReasoning.isEmpty() && !reasoningMerged) {
-            messages.add(new UnifiedMessage(UnifiedMessage.Role.ASSISTANT,
-                null, null, null, null, null,
-                String.join("\n", pendingReasoning)));
+            messages.add(UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.ASSISTANT)
+                .reasoningContent(String.join("\n", pendingReasoning))
+                .build());
         }
 
         // ---- systemInstruction 作为 SYSTEM 消息插入头部 ----
@@ -244,9 +365,10 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
             sysText = req.config().flatMap(cfg -> cfg.systemInstruction().map(Content::text)).orElse(null);
         }
         if (sysText != null && !sysText.isEmpty()) {
-            messages.add(0, new UnifiedMessage(
-                UnifiedMessage.Role.SYSTEM, sysText,
-                null, null, null, null, null));
+            messages.add(0, UnifiedMessage.builder()
+                .role(UnifiedMessage.Role.SYSTEM)
+                .content(sysText)
+                .build());
         }
 
         // ---- config（优先 SDK 解析，回退 raw JSON 提取） ----
@@ -256,11 +378,12 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
 
         if (req.config().isPresent()) {
             var cfg = req.config().get();
-            config = new UnifiedGenerationConfig(
-                cfg.temperature().map(Float::doubleValue).orElse(null),
-                cfg.topP().map(Float::doubleValue).orElse(null),
-                cfg.maxOutputTokens().orElse(null),
-                cfg.stopSequences().orElse(null), null, null, null, null);
+            config = UnifiedGenerationConfig.builder()
+                .temperature(cfg.temperature().map(Float::doubleValue).orElse(null))
+                .topP(cfg.topP().map(Float::doubleValue).orElse(null))
+                .maxOutputTokens(cfg.maxOutputTokens().orElse(null))
+                .stopSequences(cfg.stopSequences().orElse(null))
+                .build();
             if (tools == null) {
                 tools = toolMapper.mapToolsFromGemini(cfg.tools().orElse(null));
             }
@@ -270,37 +393,45 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
             config = extraConfig;
         }
 
-        return new UnifiedChatRequest(
-            req.model().orElse(null),
-            messages,
-            config,
-            tools,
-            toolChoice,
-            false   // stream
-        );
+        return UnifiedChatRequest.builder()
+            .model(req.model().orElse(null))
+            .messages(messages)
+            .config(config)
+            .tools(tools)
+            .toolChoice(toolChoice)
+            .stream(false)   // 非流式
+            .build();
     }
 
     @Override
     public byte[] fromUnifiedResponse(UnifiedChatResponse uResp) {
+        return fromUnifiedResponse(uResp, null);
+    }
+
+    public byte[] fromUnifiedResponse(UnifiedChatResponse uResp, GeminiRequestContext ctx) {
         try {
-            GenerateContentResponse resp = mapToGeminiResponse(uResp);
+            GenerateContentResponse resp = mapToGeminiResponse(uResp, ctx);
             String json = mapper.writeValueAsString(resp);
-            rememberReasoning(uResp);
+            rememberReasoning(uResp, ctx != null ? ctx.sessionKey() : null);
             return mapper.writeValueAsBytes(stripNulls(mapper.readTree(json)));
         } catch (Exception e) {
-            throw new RuntimeException("序列化 Gemini 响应失败", e);
+            throw new TransformException("序列化 Gemini 响应失败", e);
         }
     }
 
     @Override
     public String fromUnifiedStreamChunk(UnifiedChatResponse chunk) {
+        return fromUnifiedStreamChunk(chunk, null);
+    }
+
+    public String fromUnifiedStreamChunk(UnifiedChatResponse chunk, GeminiRequestContext ctx) {
         try {
-            GenerateContentResponse gChunk = mapToGeminiResponse(chunk);
+            GenerateContentResponse gChunk = mapToGeminiResponse(chunk, ctx);
             String json = mapper.writeValueAsString(gChunk);
-            rememberReasoning(chunk);
+            rememberReasoning(chunk, ctx != null ? ctx.sessionKey() : null);
             return mapper.writeValueAsString(stripNulls(mapper.readTree(json)));
         } catch (Exception e) {
-            throw new RuntimeException("序列化 Gemini 流块失败", e);
+            throw new TransformException("序列化 Gemini 流块失败", e);
         }
     }
 
@@ -363,6 +494,8 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
         StringBuilder textBuf = new StringBuilder();
         StringBuilder thoughtBuf = new StringBuilder();
         List<UnifiedToolCall> toolCalls = new ArrayList<>();
+        // 图片 part(inlineData)单独收集,与文本一起组成多模态 parts
+        List<UnifiedPart> irParts = new ArrayList<>();
         // 每个 functionResponse 独立保存，不再合并
         List<String> frIds = new ArrayList<>();
         List<String> frNames = new ArrayList<>();
@@ -375,6 +508,10 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
                 part.text().ifPresent(thoughtBuf::append);
             } else {
                 part.text().ifPresent(textBuf::append);
+            }
+            // inlineData(图片等) -> ImagePart,转 data URL 格式(与 Anthropic 入站一致)
+            if (part.inlineData().isPresent()) {
+                irParts.add(convertInlineDataToImagePart(part.inlineData().get()));
             }
             if (part.functionCall().isPresent()) {
                 FunctionCall fc = part.functionCall().get();
@@ -394,8 +531,14 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
                     tcId = "call_" + UUID.randomUUID().toString().substring(0, 8);
                 }
                 fcIdx++;
-                toolCalls.add(new UnifiedToolCall(tcId, "function",
-                    new UnifiedFunctionCall(fnName, argsNode)));
+                toolCalls.add(UnifiedToolCall.builder()
+                    .id(tcId)
+                    .type("function")
+                    .function(UnifiedFunctionCall.builder()
+                        .name(fnName)
+                        .arguments(argsNode)
+                        .build())
+                    .build());
             }
             if (part.functionResponse().isPresent()) {
                 FunctionResponse fr = part.functionResponse().get();
@@ -422,6 +565,12 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
         String reasoningContent = !thoughtBuf.isEmpty() ? thoughtBuf.toString() : null;
         List<UnifiedToolCall> finalToolCalls = !toolCalls.isEmpty() ? toolCalls : null;
 
+        // 有图片时,文本也并入 parts(放开头,保持 text+image 顺序),下游走多模态分支
+        if (!irParts.isEmpty() && text != null) {
+            irParts.add(0, new UnifiedPart.TextPart(text));
+        }
+        List<UnifiedPart> finalParts = irParts.isEmpty() ? null : irParts;
+
         List<UnifiedMessage> messages = new ArrayList<>();
 
         // ---- 第二遍：按角色构建消息 ----
@@ -430,19 +579,20 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
         if (hasFunctionResponses) {
             // 每个 functionResponse → 独立 TOOL 消息
             for (int i = 0; i < frIds.size(); i++) {
-                messages.add(new UnifiedMessage(
-                    UnifiedMessage.Role.TOOL,
-                    frContents.get(i),
-                    null, null,
-                    frIds.get(i),
-                    frNames.get(i),
-                    null));
+                messages.add(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.TOOL)
+                    .content(frContents.get(i))
+                    .toolCallId(frIds.get(i))
+                    .name(frNames.get(i))
+                    .build());
             }
             // 若有附带文本，作为单独的 USER 消息
             if (text != null) {
-                messages.add(new UnifiedMessage(
-                    UnifiedMessage.Role.USER, text,
-                    null, null, null, null, null));
+                messages.add(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.USER)
+                    .content(text)
+                    .parts(finalParts)
+                    .build());
             }
         } else {
             UnifiedMessage.Role irRole = switch (geminiRole) {
@@ -451,24 +601,78 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
                 case "function" -> UnifiedMessage.Role.TOOL;
                 default -> UnifiedMessage.Role.USER;
             };
-            messages.add(new UnifiedMessage(irRole, text, null, finalToolCalls, null, null, reasoningContent));
+            messages.add(UnifiedMessage.builder()
+                .role(irRole)
+                .content(text)
+                .toolCalls(finalToolCalls)
+                .reasoningContent(reasoningContent)
+                .parts(finalParts)
+                .build());
         }
 
         return messages;
     }
 
-    private GenerateContentResponse mapToGeminiResponse(UnifiedChatResponse uResp) {
+    // 把 Gemini Blob(inlineData)转为统一 ImagePart(data URL 格式)
+    // 与 AnthropicProtocolAdapter.convertImageToDataUrl 保持一致,下游 OpenAiRequestConverter 读 url/detail
+    private UnifiedPart convertInlineDataToImagePart(Blob blob) {
+        String mimeType = blob.mimeType().orElse("image/png");
+        byte[] bytes = blob.data().orElse(new byte[0]);
+        String base64 = Base64.getEncoder().encodeToString(bytes);
+        ObjectNode imageData = mapper.createObjectNode();
+        imageData.put("url", "data:" + mimeType + ";base64," + base64);
+        imageData.putNull("detail");
+        return new UnifiedPart.ImagePart(imageData);
+    }
+
+    // 出站:把统一 ImagePart(data URL)转回 Gemini Blob(inlineData)
+    private Part convertImagePartToInlineData(UnifiedPart.ImagePart img) {
+        try {
+            String url = img.imageData().path("url").asText("");
+            if (!url.startsWith("data:")) return null;
+            String[] segs = url.substring(5).split(",", 2);
+            if (segs.length != 2) return null;
+            String mimeType = segs[0].split(";")[0];
+            byte[] bytes = Base64.getDecoder().decode(segs[1]);
+            return Part.builder().inlineData(Blob.builder()
+                .mimeType(mimeType)
+                .data(bytes)
+                .build()).build();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private GenerateContentResponse mapToGeminiResponse(UnifiedChatResponse uResp, GeminiRequestContext ctx) {
         List<Candidate> candidates = uResp.choices().stream()
             .map(c -> {
                 // 构建 parts：thought(来自reasoningContent) → functionCall → text 兜底
                 List<Part> parts = new ArrayList<>();
                 UnifiedMessage msg = c.message();
 
-                // 1) 处理结构化 parts（如 thought）
+                // 1) 处理结构化 parts（thought/image/fileData/executableCode/codeExecutionResult）
                 if (msg != null && msg.parts() != null) {
                     for (UnifiedPart up : msg.parts()) {
-                        if ("thought".equals(up.type()) && up.text() != null) {
-                            parts.add(Part.builder().thought(true).text(up.text()).build());
+                        if (up instanceof UnifiedPart.ThinkingPart t && t.thinking() != null) {
+                            parts.add(Part.builder().thought(true).text(t.thinking()).build());
+                        } else if (up instanceof UnifiedPart.ImagePart img) {
+                            Part inlinePart = convertImagePartToInlineData(img);
+                            if (inlinePart != null) parts.add(inlinePart);
+                        } else if (up instanceof UnifiedPart.FileDataPart fd) {
+                            parts.add(Part.builder().fileData(FileData.builder()
+                                .fileUri(fd.fileUri())
+                                .mimeType(fd.mimeType())
+                                .build()).build());
+                        } else if (up instanceof UnifiedPart.ExecutableCodePart ec) {
+                            parts.add(Part.builder().executableCode(ExecutableCode.builder()
+                                .language(ec.language())
+                                .code(ec.code())
+                                .build()).build());
+                        } else if (up instanceof UnifiedPart.CodeExecutionResultPart cer) {
+                            parts.add(Part.builder().codeExecutionResult(CodeExecutionResult.builder()
+                                .outcome(cer.outcome())
+                                .output(cer.output())
+                                .build()).build());
                         }
                     }
                 }
@@ -507,6 +711,56 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
                                 .functionCall(fcBuilder.build())
                                 .build());
                         }
+                    }
+                }
+
+                // 3.5) 真流式:按 index 累积 toolCallArgumentDeltas,finishReason 时组装完整 functionCall
+                //     多 toolCall 支持通过 ctx.toolCallAccs() 的 Map<Integer, ToolCallAcc> 实现
+                if (ctx != null && c.delta() != null) {
+                    if (c.delta().toolCalls() != null) {
+                        for (UnifiedToolCall tc : c.delta().toolCalls()) {
+                            int tcIndex = tc.index() != null ? tc.index() : 0;
+                            GeminiRequestContext.ToolCallAcc acc = ctx.toolCallAccs()
+                                .computeIfAbsent(tcIndex, k -> new GeminiRequestContext.ToolCallAcc());
+                            if (tc.id() != null) acc.id = tc.id();
+                            if (tc.function() != null && tc.function().name() != null) {
+                                acc.fnName = tc.function().name();
+                            }
+                        }
+                    }
+                    // 新(按 index 累积):每个 arguments 增量严格归属对应 acc
+                    if (c.delta().toolCallArgumentDeltas() != null) {
+                        for (IndexedArgumentDelta d : c.delta().toolCallArgumentDeltas()) {
+                            if (d.index() == null) {
+                                log.warn("Gemini 出站 IndexedArgumentDelta index 为 null,跳过: partial={}",
+                                    d.partialJson());
+                                continue;
+                            }
+                            GeminiRequestContext.ToolCallAcc acc = ctx.toolCallAccs()
+                                .computeIfAbsent(d.index(), k -> new GeminiRequestContext.ToolCallAcc());
+                            acc.argsBuilder.append(d.partialJson());
+                        }
+                    }
+                }
+                if (ctx != null && c.finishReason() != null) {
+                    for (var entry : ctx.toolCallAccs().entrySet()) {
+                        GeminiRequestContext.ToolCallAcc acc = entry.getValue();
+                        if (acc.fnName != null && acc.argsBuilder.length() > 0) {
+                            Map<String, Object> args = new HashMap<>();
+                            try {
+                                args = mapper.readValue(acc.argsBuilder.toString(),
+                                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                            } catch (Exception e) {
+                                log.warn("Gemini 出站累积 args 解析失败: name={} args={}",
+                                    acc.fnName, acc.argsBuilder, e);
+                            }
+                            var fcBuilder = FunctionCall.builder()
+                                .name(acc.fnName)
+                                .args(args);
+                            if (acc.id != null) fcBuilder.id(acc.id);
+                            parts.add(Part.builder().functionCall(fcBuilder.build()).build());
+                        }
+                        acc.reset();
                     }
                 }
 
@@ -560,12 +814,20 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
 
     private FinishReason mapFinishReason(String reason) {
         if (reason == null) return null;
-        return switch (reason) {
-            case "stop" -> new FinishReason(FinishReason.Known.STOP);
-            case "length" -> new FinishReason(FinishReason.Known.MAX_TOKENS);
-            case "content_filter" -> new FinishReason(FinishReason.Known.SAFETY);
-            default -> new FinishReason(FinishReason.Known.STOP);
-        };
+        // spec 第 5 节:如果是 Gemini 合法值直接用(同协议零损失)
+        try {
+            return new FinishReason(FinishReason.Known.valueOf(reason));
+        } catch (IllegalArgumentException e) {
+            // 跨协议:按语义映射
+            return switch (reason) {
+                case "stop" -> new FinishReason(FinishReason.Known.STOP);
+                case "length" -> new FinishReason(FinishReason.Known.MAX_TOKENS);
+                case "content_filter" -> new FinishReason(FinishReason.Known.SAFETY);
+                case "end_turn", "stop_sequence", "tool_use" ->
+                    new FinishReason(FinishReason.Known.STOP);
+                default -> new FinishReason(FinishReason.Known.STOP);
+            };
+        }
     }
 
     // ===== Reasoning 缓存辅助方法 =====
@@ -598,8 +860,7 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
     }
 
     /** 将出站 chunk 中的 reasoningContent 写入缓存 */
-    private void rememberReasoning(UnifiedChatResponse chunk) {
-        String sessionKey = currentSessionKey.get();
+    private void rememberReasoning(UnifiedChatResponse chunk, String sessionKey) {
         if (sessionKey == null || chunk.choices() == null) return;
         for (var choice : chunk.choices()) {
             String rc = null;
@@ -609,16 +870,6 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
                 reasoningStore.remember(sessionKey, rc);
             }
         }
-    }
-
-    /** 设置当前请求的会话键（由 ProxyController 调用） */
-    public void setCurrentSessionKey(String key) {
-        currentSessionKey.set(key);
-    }
-
-    /** 清理当前请求的会话键 */
-    public void clearCurrentSessionKey() {
-        currentSessionKey.remove();
     }
 
     /** 公开的 sessionKey 提取方法，供 ProxyController 调用 */

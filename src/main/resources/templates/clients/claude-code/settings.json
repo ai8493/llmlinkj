@@ -1,0 +1,11 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "[[${proxyBaseUrl}]]",
+    "ANTHROPIC_AUTH_TOKEN": "[[${apiKey}]]",
+    "ANTHROPIC_MODEL": "[[${defaultModel}]]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "[[${defaultModel}]]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "[[${defaultModel}]]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "[[${defaultModel}]]",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "[[${defaultModel}]]"
+  }
+}

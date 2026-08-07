@@ -32,7 +32,7 @@ class SecurityConfigTest {
         // 本测试无 @WireMockTest，后端调用必失败 → 5xx，证明 SecurityConfig 放行了 /v1/*。
         backendRepo.save(new BackendConfigEntity(
             "deepseek", "openai", "test-key", "http://localhost:8089/v1", "gpt-4",
-            null, 5L, 10L, 5L, 5, 60L, "2026-01-01T00:00:00Z"));
+            null, 5L, 10L, 5L, 5, 60L, null, null, null, null, "2026-01-01T00:00:00Z"));
         protocolRepo.save(new ProtocolMappingEntity(
             "openai", "deepseek", true, "2026-01-01T00:00:00Z", null));
         protocolRepo.save(new ProtocolMappingEntity(

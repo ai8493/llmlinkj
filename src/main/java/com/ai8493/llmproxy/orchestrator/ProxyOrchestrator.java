@@ -32,16 +32,26 @@ public class ProxyOrchestrator {
 
     public UnifiedChatResponse handle(UnifiedChatRequest uReq, String inboundProtocol) {
         Route r = resolve(inboundProtocol, uReq.model());
-        return r.adapter().call(new UnifiedChatRequest(
-            r.actualModel(), uReq.messages(), uReq.config(),
-            uReq.tools(), uReq.toolChoice(), uReq.stream()));
+        return r.adapter().call(UnifiedChatRequest.builder()
+            .model(r.actualModel())
+            .messages(uReq.messages())
+            .config(uReq.config())
+            .tools(uReq.tools())
+            .toolChoice(uReq.toolChoice())
+            .stream(uReq.stream())
+            .build());
     }
 
     public Flux<UnifiedChatResponse> handleStream(UnifiedChatRequest uReq, String inboundProtocol) {
         Route r = resolve(inboundProtocol, uReq.model());
-        return r.adapter().stream(new UnifiedChatRequest(
-            r.actualModel(), uReq.messages(), uReq.config(),
-            uReq.tools(), uReq.toolChoice(), uReq.stream()));
+        return r.adapter().stream(UnifiedChatRequest.builder()
+            .model(r.actualModel())
+            .messages(uReq.messages())
+            .config(uReq.config())
+            .tools(uReq.tools())
+            .toolChoice(uReq.toolChoice())
+            .stream(uReq.stream())
+            .build());
     }
 
     public java.util.List<ModelInfo> listModels(String inboundProtocol) {

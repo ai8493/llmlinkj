@@ -27,16 +27,51 @@ VALUES('ark-claude', 'anthropic', NULL, 'https://ark.cn-beijing.volces.com/api/c
 INSERT OR IGNORE INTO backend_config
 (name, protocol, api_key, base_url, default_model, default_max_tokens, connect_timeout, read_timeout, write_timeout, max_idle_connections, keep_alive_duration, updated_at)
 VALUES('siliconflow-claude', 'anthropic', NULL, 'https://api.siliconflow.cn', 'glm-5.1', 100000, 10, 600, 30, 20, 300, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO backend_config
+(name, protocol, api_key, base_url, default_model, default_max_tokens, connect_timeout, read_timeout, write_timeout, max_idle_connections, keep_alive_duration, updated_at)
+VALUES('step-claude', 'anthropic', NULL, 'https://api.stepfun.com/step_plan', 'step-3.7-flash', 100000, 10, 600, 30, 20, 300, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO backend_config
+(name, protocol, api_key, base_url, default_model, default_max_tokens, connect_timeout, read_timeout, write_timeout, max_idle_connections, keep_alive_duration, updated_at)
+VALUES('step-openai', 'openai', NULL, 'https://api.stepfun.com/step_plan', 'step-3.7-flash', 100000, 10, 600, 30, 20, 300, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+
 
 INSERT OR IGNORE INTO protocol_mapping
 (client_protocol, backend_cfg_name, enabled, updated_at)
-VALUES('responses', 'deepseek-claude', 1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+VALUES('responses', 'deepseek-claude', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
 INSERT OR IGNORE INTO protocol_mapping
 (client_protocol, backend_cfg_name, enabled, updated_at)
 VALUES('responses', 'deepseek-openai', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
 INSERT OR IGNORE INTO protocol_mapping
 (client_protocol, backend_cfg_name, enabled, updated_at)
-VALUES('gemini', 'deepseek-claude', 1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+VALUES('responses', 'minimax-claude', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('responses', 'minimax-openai', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('responses', 'step-claude', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('responses', 'step-openai', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('gemini', 'deepseek-claude', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('gemini', 'deepseek-openai', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('gemini', 'minimax-claude', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('gemini', 'minimax-openai', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('gemini', 'step-claude', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT OR IGNORE INTO protocol_mapping
+(client_protocol, backend_cfg_name, enabled, updated_at)
+VALUES('gemini', 'step-openai', 0, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
 
 INSERT OR IGNORE INTO model_mapping
 (client_protocol, backend_cfg_name, request_model, actual_model, updated_at)

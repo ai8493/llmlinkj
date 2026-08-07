@@ -36,11 +36,12 @@ class FunctionCallMapperTest {
 
     @Test
     void shouldMapToolMessageToFunctionResponse() {
-        var toolMsg = new UnifiedMessage(
-            UnifiedMessage.Role.TOOL,
-            "{\"temperature\": 25}",
-            null, null, "call_456",
-            "get_temperature", null);
+        var toolMsg = UnifiedMessage.builder()
+            .role(UnifiedMessage.Role.TOOL)
+            .content("{\"temperature\": 25}")
+            .toolCallId("call_456")
+            .name("get_temperature")
+            .build();
 
         var result = mapper.mapToolResults(List.of(toolMsg));
 

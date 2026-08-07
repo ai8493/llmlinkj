@@ -45,7 +45,10 @@ public class ConfigService {
                 e.name(), e.protocol(), e.apiKey(), e.baseUrl(),
                 e.defaultModel(), e.defaultMaxTokens(),
                 e.connectTimeout(), e.readTimeout(), e.writeTimeout(),
-                e.maxIdleConnections(), e.keepAliveDuration(), e.updatedAt()));
+                e.maxIdleConnections(), e.keepAliveDuration(),
+                e.reasoningEffortMode(), e.reasoningEffortDefault(),
+                e.thinkingDefaultType(), e.thinkingDefaultBudget(),
+                e.updatedAt()));
         });
         return list;
     }
@@ -62,7 +65,10 @@ public class ConfigService {
             e.name(), e.protocol(), e.apiKey(), e.baseUrl(),
             e.defaultModel(), e.defaultMaxTokens(),
             e.connectTimeout(), e.readTimeout(), e.writeTimeout(),
-            e.maxIdleConnections(), e.keepAliveDuration(), e.updatedAt())).toList();
+            e.maxIdleConnections(), e.keepAliveDuration(),
+            e.reasoningEffortMode(), e.reasoningEffortDefault(),
+            e.thinkingDefaultType(), e.thinkingDefaultBudget(),
+            e.updatedAt())).toList();
         return new PageImpl<>(entities, pageable, total);
     }
 
@@ -77,6 +83,8 @@ public class ConfigService {
             input.defaultModel(), input.defaultMaxTokens(),
             input.connectTimeout(), input.readTimeout(), input.writeTimeout(),
             input.maxIdleConnections(), input.keepAliveDuration(),
+            input.reasoningEffortMode(), input.reasoningEffortDefault(),
+            input.thinkingDefaultType(), input.thinkingDefaultBudget(),
             Instant.now().toString()));
         backendFactory.invalidate(input.name());
     }

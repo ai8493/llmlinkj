@@ -423,7 +423,7 @@ class ClientConfigServiceTest {
         // 数据库插入一条 responses 协议映射 + 对应后端
         backendRepo.save(new BackendConfigEntity(
             "deepseek", "responses", "k", "u", "deepseek-v3", null,
-            5, 5, 5, 5, 60, "2026-06-01T00:00:00Z"));
+            5, 5, 5, 5, 60, null, null, null, null, "2026-06-01T00:00:00Z"));
         protocolRepo.save(new ProtocolMappingEntity(
             "responses", "deepseek", true, "2026-06-01T00:00:00Z", null));
 
@@ -444,11 +444,61 @@ class ClientConfigServiceTest {
     }
 
     @Test
+    void readFile_claude的settings_json_渲染含代理字段且不残留模板表达式() {
+        service.setHomeDirForTest(tempDir.resolve("claude-render-cfg").toString());
+
+        var result = service.readFile("claude-code", "settings.json");
+        assertThat(result.exists()).isFalse();
+        assertThat(result.content())
+            .contains("http://localhost:8493")
+            .contains("ANTHROPIC_BASE_URL")
+            .contains("ANTHROPIC_AUTH_TOKEN")
+            .contains("ANTHROPIC_MODEL")
+            .contains("ANTHROPIC_DEFAULT_SONNET_MODEL")
+            .contains("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .contains("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            .contains("CLAUDE_CODE_SUBAGENT_MODEL")
+            .doesNotContain("[[${");
+    }
+
+    @Test
+    void readFile_claude的settings_json_本地文件存在_原样返回且filled为false() throws Exception {
+        Path cfgDir = tempDir.resolve("claude-exist-cfg/.claude");
+        Files.createDirectories(cfgDir);
+        Files.writeString(cfgDir.resolve("settings.json"),
+            "{\n  \"env\": {\n    \"ANTHROPIC_BASE_URL\": \"https://old.example.com\"\n  }\n}");
+
+        service.setHomeDirForTest(tempDir.resolve("claude-exist-cfg").toString());
+
+        var result = service.readFile("claude-code", "settings.json");
+        assertThat(result.exists()).isTrue();
+        assertThat(result.filled()).isFalse();
+        assertThat(result.content()).contains("old.example.com");
+    }
+
+    @Test
+    void readFile_claude的settings_json_渲染含后端默认模型名() {
+        // 数据库插入一条 anthropic 协议映射 + 后端
+        backendRepo.save(new BackendConfigEntity(
+            "anthropic-backend", "anthropic", "k", "u", "claude-sonnet-4-5", null,
+            5, 5, 5, 5, 60, null, null, null, null, "2026-08-07T00:00:00Z"));
+        protocolRepo.save(new ProtocolMappingEntity(
+            "anthropic", "anthropic-backend", true, "2026-08-07T00:00:00Z", null));
+
+        service.setHomeDirForTest(tempDir.resolve("claude-model-cfg").toString());
+
+        var result = service.readFile("claude-code", "settings.json");
+        assertThat(result.content()).contains("ANTHROPIC_MODEL\": \"claude-sonnet-4-5\"");
+        assertThat(result.content()).contains("ANTHROPIC_DEFAULT_SONNET_MODEL\": \"claude-sonnet-4-5\"");
+        assertThat(result.content()).contains("CLAUDE_CODE_SUBAGENT_MODEL\": \"claude-sonnet-4-5\"");
+    }
+
+    @Test
     void readFile_gemini的env_渲染含后端默认模型名() {
         // 数据库插入一条 gemini 协议映射 + 对应后端
         backendRepo.save(new BackendConfigEntity(
             "gemini", "gemini", "k", "u", "gemini-2.0-flash-exp", null,
-            5, 5, 5, 5, 60, "2026-06-01T00:00:00Z"));
+            5, 5, 5, 5, 60, null, null, null, null, "2026-06-01T00:00:00Z"));
         protocolRepo.save(new ProtocolMappingEntity(
             "gemini", "gemini", true, "2026-06-01T00:00:00Z", null));
 
@@ -463,11 +513,11 @@ class ClientConfigServiceTest {
         service.setHomeDirForTest(tempDir.resolve("list-cfg").toString());
         var clients = service.listClients();
 
-        assertThat(clients).hasSize(2);
+        assertThat(clients).hasSize(3);
         assertThat(clients).extracting(ClientInfo::id)
-            .containsExactlyInAnyOrder("codex", "gemini-cli");
+            .containsExactlyInAnyOrder("codex", "gemini-cli", "claude-code");
         assertThat(clients).extracting(ClientInfo::displayName)
-            .containsExactlyInAnyOrder("Codex", "Gemini CLI");
+            .containsExactlyInAnyOrder("Codex", "Gemini CLI", "Claude Code");
 
         ClientInfo codex = clients.stream()
             .filter(c -> c.id().equals("codex")).findFirst().orElseThrow();
@@ -483,6 +533,17 @@ class ClientConfigServiceTest {
         assertThat(codex.files().get(1).absolutePath())
             .isEqualTo(tempDir.resolve("list-cfg").resolve(".codex").resolve("auth.json")
                 .toAbsolutePath().toString());
+
+        ClientInfo claude = clients.stream()
+            .filter(c -> c.id().equals("claude-code")).findFirst().orElseThrow();
+        assertThat(claude.files()).hasSize(1);
+        assertThat(claude.files()).extracting(ClientInfo.FileMeta::filename)
+            .containsExactly("settings.json");
+        assertThat(claude.files()).extracting(ClientInfo.FileMeta::language)
+            .containsExactly("json");
+        assertThat(claude.files().get(0).absolutePath())
+            .isEqualTo(tempDir.resolve("list-cfg").resolve(".claude").resolve("settings.json")
+                .toAbsolutePath().toString());
     }
 
     @Test
@@ -490,7 +551,7 @@ class ClientConfigServiceTest {
         // 数据库插入 responses 协议映射 + 后端，提供 defaultModel
         backendRepo.save(new BackendConfigEntity(
             "deepseek", "responses", "k", "u", "deepseek-v3", null,
-            5, 5, 5, 5, 60, "2026-06-01T00:00:00Z"));
+            5, 5, 5, 5, 60, null, null, null, null, "2026-06-01T00:00:00Z"));
         protocolRepo.save(new ProtocolMappingEntity(
             "responses", "deepseek", true, "2026-06-01T00:00:00Z", null));
 
@@ -519,7 +580,7 @@ class ClientConfigServiceTest {
         // 数据库插入 responses 协议映射 + 后端，提供 defaultModel
         backendRepo.save(new BackendConfigEntity(
             "deepseek", "responses", "k", "u", "deepseek-v3", null,
-            5, 5, 5, 5, 60, "2026-06-01T00:00:00Z"));
+            5, 5, 5, 5, 60, null, null, null, null, "2026-06-01T00:00:00Z"));
         protocolRepo.save(new ProtocolMappingEntity(
             "responses", "deepseek", true, "2026-06-01T00:00:00Z", null));
 
@@ -587,5 +648,67 @@ class ClientConfigServiceTest {
                 service.applyProxyDefaults("codex", "../../../etc/passwd"))
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("文件不在白名单");
+    }
+
+    @Test
+    void applyProxyDefaults_claude的settings_json_替换env字段并写回() throws Exception {
+        // 数据库插入 anthropic 协议映射 + 后端,提供 defaultModel
+        backendRepo.save(new BackendConfigEntity(
+            "anthropic-backend", "anthropic", "k", "u", "claude-sonnet-4-5", null,
+            5, 5, 5, 5, 60, null, null, null, null, "2026-08-07T00:00:00Z"));
+        protocolRepo.save(new ProtocolMappingEntity(
+            "anthropic", "anthropic-backend", true, "2026-08-07T00:00:00Z", null));
+
+        // 预置含旧值的 settings.json
+        service.setHomeDirForTest(tempDir.resolve("claude-apply-cfg").toString());
+        Path cfgDir = tempDir.resolve("claude-apply-cfg/.claude");
+        Files.createDirectories(cfgDir);
+        Files.writeString(cfgDir.resolve("settings.json"),
+            "{\n" +
+            "  \"env\": {\n" +
+            "    \"ANTHROPIC_BASE_URL\": \"https://old.example.com\",\n" +
+            "    \"ANTHROPIC_AUTH_TOKEN\": \"old-token\",\n" +
+            "    \"ANTHROPIC_MODEL\": \"old-model\",\n" +
+            "    \"ANTHROPIC_DEFAULT_SONNET_MODEL\": \"old-sonnet\",\n" +
+            "    \"ANTHROPIC_DEFAULT_OPUS_MODEL\": \"old-opus\",\n" +
+            "    \"ANTHROPIC_DEFAULT_HAIKU_MODEL\": \"old-haiku\",\n" +
+            "    \"CLAUDE_CODE_SUBAGENT_MODEL\": \"old-subagent\"\n" +
+            "  }\n" +
+            "}");
+
+        ApplyResult result = service.applyProxyDefaults("claude-code", "settings.json");
+
+        assertThat(result.updated()).isTrue();
+        assertThat(result.content())
+            .contains("http://localhost:8493")
+            .contains("\"123456\"")
+            .contains("claude-sonnet-4-5");
+        assertThat(result.content()).doesNotContain("old.example.com");
+        assertThat(result.content()).doesNotContain("old-model");
+        assertThat(result.content()).doesNotContain("old-sonnet");
+        assertThat(result.content()).doesNotContain("old-opus");
+        assertThat(result.content()).doesNotContain("old-haiku");
+        assertThat(result.content()).doesNotContain("old-subagent");
+        // 落盘一致
+        assertThat(Files.readString(cfgDir.resolve("settings.json")))
+            .contains("claude-sonnet-4-5")
+            .doesNotContain("old.example.com");
+    }
+
+    @Test
+    void applyProxyDefaults_claude的settings_json_文件无env字段_返回原内容且updated为true() throws Exception {
+        // settings.json 无 env 块,7 个 updatableField 都找不到替换点 -> 不新增字段(content 不含 ANTHROPIC_)
+        // 但 applyProxyDefaults 在 fields 非空时返回 updated=true(与 codex/gemini-cli 既有行为一致)
+        service.setHomeDirForTest(tempDir.resolve("claude-no-env-cfg").toString());
+        Path cfgDir = tempDir.resolve("claude-no-env-cfg/.claude");
+        Files.createDirectories(cfgDir);
+        Files.writeString(cfgDir.resolve("settings.json"),
+            "{\n  \"ui\": {\n    \"errorVerbosity\": \"full\"\n  }\n}");
+
+        ApplyResult result = service.applyProxyDefaults("claude-code", "settings.json");
+
+        assertThat(result.updated()).isTrue();
+        assertThat(result.content()).contains("errorVerbosity");
+        assertThat(result.content()).doesNotContain("ANTHROPIC_");
     }
 }
