@@ -156,10 +156,10 @@ class AnthropicProtocolAdapterStreamingTest {
         assertThat(usage.path("input_tokens").asInt()).isEqualTo(70);
         assertThat(usage.path("cache_read_input_tokens").asInt()).isEqualTo(30);
         assertThat(usage.path("output_tokens").asInt()).isEqualTo(0);
-        // cache_creation 为 0 不输出(与非流式一致)
-        assertThat(usage.has("cache_creation_input_tokens")).isFalse();
-        // reasoning_tokens 即使为 0 也输出
-        assertThat(usage.path("reasoning_tokens").asInt()).isEqualTo(0);
+        // Anthropic 协议规范要求 cache_creation_input_tokens 即使为 0 也输出
+        assertThat(usage.path("cache_creation_input_tokens").asInt()).isEqualTo(0);
+        // reasoning_tokens 非 Anthropic 协议字段,不应输出
+        assertThat(usage.has("reasoning_tokens")).isFalse();
     }
 
     @Test
@@ -196,8 +196,10 @@ class AnthropicProtocolAdapterStreamingTest {
         // 计费恒等式:input_tokens(50) + cache_read(0) + cache_creation(50) = 100
         assertThat(usage.path("input_tokens").asInt()).isEqualTo(50);
         assertThat(usage.path("cache_creation_input_tokens").asInt()).isEqualTo(50);
-        assertThat(usage.has("cache_read_input_tokens")).isFalse();
-        assertThat(usage.path("reasoning_tokens").asInt()).isEqualTo(10);
+        // Anthropic 协议规范要求 cache_read_input_tokens 即使为 0 也输出
+        assertThat(usage.path("cache_read_input_tokens").asInt()).isEqualTo(0);
+        // reasoning_tokens 非 Anthropic 协议字段,不应输出
+        assertThat(usage.has("reasoning_tokens")).isFalse();
     }
 
     @Test
@@ -239,7 +241,8 @@ class AnthropicProtocolAdapterStreamingTest {
         assertThat(cacheRead).isEqualTo(30);
         assertThat(cacheCreation).isEqualTo(20);
         assertThat(inputTokens).isEqualTo(50);
-        assertThat(usage.path("reasoning_tokens").asInt()).isEqualTo(5);
+        // reasoning_tokens 非 Anthropic 协议字段,不应输出
+        assertThat(usage.has("reasoning_tokens")).isFalse();
         // 计费恒等式显式求和:input + cache_read + cache_creation == 原 promptTokens(100)
         assertThat(inputTokens + cacheRead + cacheCreation).isEqualTo(100);
     }
@@ -344,6 +347,8 @@ class AnthropicProtocolAdapterStreamingTest {
         assertThat(finalEvents.get(0)).contains("\"stop_reason\":\"end_turn\"");
         // output_tokens 应为最终值 50(非中间值 5)
         assertThat(finalEvents.get(0)).contains("\"output_tokens\":50");
+        // Anthropic 规范要求 message_delta.usage 也包含 input_tokens(最终值)
+        assertThat(finalEvents.get(0)).contains("\"input_tokens\":10");
         assertThat(finalEvents.get(1)).contains("\"message_stop\"");
     }
 
@@ -470,5 +475,53 @@ class AnthropicProtocolAdapterStreamingTest {
         assertThat(inputJsonDeltas.get(0)).contains("\"partial_json\":\"{\\\"city\\\":");
         assertThat(inputJsonDeltas.get(1)).contains("\"index\":1");
         assertThat(inputJsonDeltas.get(1)).contains("\"partial_json\":\"{\\\"tz\\\":");
+    }
+
+    @Test
+    void shouldEmitSignatureDeltaForThinkingSignature() throws Exception {
+        // 流式 thinking signature 应通过 signature_delta 事件单独发送(Anthropic 流式规范)
+        // 后端 AnthropicStreamingResponseConverter 把 signature_delta 转成 UnifiedDelta.thinkingSignature
+        AnthropicProtocolAdapter.StreamState state = new AnthropicProtocolAdapter.StreamState();
+
+        // chunk 1: message_start + content_block_start(thinking) + thinking_delta
+        UnifiedChatResponse chunk1 = UnifiedChatResponse.builder()
+            .id("msg-sig-1")
+            .model("claude-3-5-sonnet")
+            .object("chat.completion.chunk")
+            .created(1700000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .delta(UnifiedDelta.builder()
+                    .reasoningContent("思考中")
+                    .build())
+                .build()))
+            .usage(UnifiedUsage.builder()
+                .promptTokens(10).completionTokens(0).totalTokens(10).build())
+            .build();
+        adapter.toStreamEvents(chunk1, state);
+
+        // chunk 2: signature_delta(通过 delta.thinkingSignature 传入)
+        UnifiedChatResponse chunk2 = UnifiedChatResponse.builder()
+            .id("msg-sig-1")
+            .model("claude-3-5-sonnet")
+            .object("chat.completion.chunk")
+            .created(1700000000L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .delta(UnifiedDelta.builder()
+                    .thinkingSignature("sig-abc-123")
+                    .build())
+                .build()))
+            .build();
+        List<String> events2 = adapter.toStreamEvents(chunk2, state);
+
+        // 验证:产出 signature_delta 事件
+        String sigEvent = events2.stream()
+            .filter(e -> e.contains("\"signature_delta\""))
+            .findFirst().orElseThrow(() -> new AssertionError("未找到 signature_delta 事件"));
+        JsonNode sigRoot = mapper.readTree(sigEvent);
+        assertThat(sigRoot.path("type").asText()).isEqualTo("content_block_delta");
+        assertThat(sigRoot.path("delta").path("type").asText()).isEqualTo("signature_delta");
+        assertThat(sigRoot.path("delta").path("signature").asText()).isEqualTo("sig-abc-123");
     }
 }

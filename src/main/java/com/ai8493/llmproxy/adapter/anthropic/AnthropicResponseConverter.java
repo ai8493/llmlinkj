@@ -88,13 +88,20 @@ public class AnthropicResponseConverter {
         // 6. Model
         String model = sdkResp.model().asString();
 
-        // stopSequence -> AnthropicExtensions.matchedStopSequence
-        AnthropicExtensions anthropicExt = null;
+        // stopSequence -> AnthropicExtensions.matchedStopSequence + 原始响应 JSON 透传
+        AnthropicExtensions.Builder extBuilder = AnthropicExtensions.builder();
         if (sdkResp.stopSequence().isPresent()) {
-            anthropicExt = AnthropicExtensions.builder()
-                .matchedStopSequence(sdkResp.stopSequence().get())
-                .build();
+            extBuilder.matchedStopSequence(sdkResp.stopSequence().get());
         }
+        // 原始响应 JSON 透传(anthropic->anthropic 同协议字段零损失)
+        try {
+            JsonNode rawMessage = com.anthropic.core.ObjectMappers.jsonMapper()
+                .convertValue(sdkResp, JsonNode.class);
+            extBuilder.responseRawMessage(rawMessage);
+        } catch (Exception e) {
+            log.warn("原始响应 JSON 序列化失败,跳过 responseRawMessage: {}", e.getMessage());
+        }
+        AnthropicExtensions anthropicExt = extBuilder.build();
 
         return UnifiedChatResponse.builder()
                 .id(sdkResp.id())
@@ -112,7 +119,10 @@ public class AnthropicResponseConverter {
     private UnifiedToolCall toUnifiedToolCall(ToolUseBlock tu) {
         JsonNode args = null;
         try {
-            args = MAPPER.readTree(tu._input().toString());
+            // tu._input() 返回 com.anthropic.core.JsonValue(子类 JsonObject)
+            // 其 toString() 是 Map.toString() 格式 {key=value} 非合法 JSON,不能用 readTree
+            // JsonObject.values() 有 @JsonValue 注解,convertValue 会正确序列化
+            args = MAPPER.convertValue(tu._input(), JsonNode.class);
             log.debug("非流式 tool_use 转换: name={} id={} args={}", tu.name(), tu.id(), args);
         } catch (Exception e) {
             log.warn("tool_use input JSON 解析失败: id={} name={}", tu.id(), tu.name(), e);

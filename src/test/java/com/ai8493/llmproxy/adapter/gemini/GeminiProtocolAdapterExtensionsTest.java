@@ -5,6 +5,7 @@ import com.ai8493.llmproxy.model.UnifiedChatResponse;
 import com.ai8493.llmproxy.model.UnifiedChoice;
 import com.ai8493.llmproxy.model.UnifiedMessage;
 import com.ai8493.llmproxy.model.UnifiedPart;
+import com.ai8493.llmproxy.model.UnifiedUsage;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -181,5 +182,68 @@ class GeminiProtocolAdapterExtensionsTest {
             }
         }
         assertThat(hasFileData).isTrue();
+    }
+
+    @Test
+    void shouldOutputCachedContentTokenCountInUsageMetadata() throws Exception {
+        // IR cachedTokens(来自 Anthropic cache_read_input_tokens)应映射到 Gemini cachedContentTokenCount
+        var adapter = new GeminiProtocolAdapter();
+        var uResp = UnifiedChatResponse.builder()
+            .model("gemini-pro")
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .content("hi")
+                    .build())
+                .finishReason("STOP")
+                .build()))
+            .usage(UnifiedUsage.builder()
+                .promptTokens(311)
+                .completionTokens(131)
+                .totalTokens(442)
+                .cachedTokens(221056)
+                .cacheCreationTokens(0)
+                .build())
+            .build();
+
+        byte[] out = adapter.fromUnifiedResponse(uResp);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(out);
+        var usage = json.path("usageMetadata");
+        assertThat(usage.path("promptTokenCount").asInt()).isEqualTo(311);
+        assertThat(usage.path("candidatesTokenCount").asInt()).isEqualTo(131);
+        assertThat(usage.path("totalTokenCount").asInt()).isEqualTo(442);
+        // cachedContentTokenCount 应透传 IR.cachedTokens
+        assertThat(usage.path("cachedContentTokenCount").asInt()).isEqualTo(221056);
+    }
+
+    @Test
+    void shouldInjectThoughtSignatureInThoughtPart() throws Exception {
+        // IR thinkingSignature 应注入到 Gemini thought part(Gemini CLI 期望 String 形式,非 SDK 的 byte[])
+        var adapter = new GeminiProtocolAdapter();
+        var uResp = UnifiedChatResponse.builder()
+            .model("gemini-pro")
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .reasoningContent("思考中")
+                    .thinkingSignature("sig-abc-123")
+                    .content("你好")
+                    .build())
+                .finishReason("STOP")
+                .build()))
+            .build();
+
+        byte[] out = adapter.fromUnifiedResponse(uResp);
+        var json = new com.fasterxml.jackson.databind.ObjectMapper().readTree(out);
+        var parts = json.path("candidates").get(0).path("content").path("parts");
+        String thoughtSig = null;
+        for (var p : parts) {
+            if (p.has("thought") && p.path("thought").asBoolean(false)) {
+                thoughtSig = p.path("thoughtSignature").asText(null);
+            }
+        }
+        assertThat(thoughtSig).isEqualTo("sig-abc-123");
     }
 }

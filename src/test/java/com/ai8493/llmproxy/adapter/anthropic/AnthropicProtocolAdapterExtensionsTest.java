@@ -233,4 +233,107 @@ class AnthropicProtocolAdapterExtensionsTest {
         UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
         assertThat(req.toolChoice()).isInstanceOf(UnifiedToolChoice.Any.class);
     }
+
+    @Test
+    void shouldSupportNewExtensionsFields() {
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var ext = com.ai8493.llmproxy.model.extensions.AnthropicExtensions.builder()
+            .outputConfig(mapper.createObjectNode().put("effort", "max"))
+            .contextManagement(mapper.createObjectNode().put("clear_thinking", true))
+            .toolResultIsError(java.util.Map.of("call_abc", true))
+            .rawToolResultBlocks(java.util.Map.of("call_abc", mapper.createArrayNode()))
+            .build();
+        assertThat(ext.outputConfig()).isNotNull();
+        assertThat(ext.contextManagement()).isNotNull();
+        assertThat(ext.toolResultIsError()).containsEntry("call_abc", true);
+        assertThat(ext.rawToolResultBlocks()).containsKey("call_abc");
+    }
+
+    @Test
+    void shouldParseMetadataUserIdToExtensions() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"metadata\":{\"user_id\":\"user-abc\"}}";
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().metadataUserId()).isEqualTo("user-abc");
+    }
+
+    @Test
+    void shouldParseOutputConfigToExtensions() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"output_config\":{\"effort\":\"max\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\",\"properties\":{}}}}}";
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().outputConfig()).isNotNull();
+        assertThat(req.anthropic().outputConfig().path("effort").asText()).isEqualTo("max");
+        assertThat(req.anthropic().outputConfig().path("format").path("type").asText()).isEqualTo("json_schema");
+    }
+
+    @Test
+    void shouldParseContextManagementToExtensions() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"context_management\":{\"edits\":[{\"type\":\"clear_thinking_20251015\",\"keep\":\"all\"}]}}";
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().contextManagement()).isNotNull();
+        assertThat(req.anthropic().contextManagement().path("edits").isArray()).isTrue();
+    }
+
+    @Test
+    void shouldMergeAllTopLevelFieldsWithBetaHeaderAndSystemArray() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"system\":[{\"type\":\"text\",\"text\":\"instr\"}],\"metadata\":{\"user_id\":\"u1\"},\"output_config\":{\"effort\":\"high\"},\"context_management\":{\"edits\":[]}}";
+        Map<String, String> headers = Map.of("anthropic-beta", "prompt-caching-2024-07-31");
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), headers);
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().rawSystemArray()).isNotNull();
+        assertThat(req.anthropic().betaHeaders()).containsExactly("prompt-caching-2024-07-31");
+        assertThat(req.anthropic().metadataUserId()).isEqualTo("u1");
+        assertThat(req.anthropic().outputConfig()).isNotNull();
+        assertThat(req.anthropic().contextManagement()).isNotNull();
+    }
+
+    @Test
+    void shouldParseUserTextBlockCacheControl() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"cached text\",\"cache_control\":{\"type\":\"ephemeral\"}}]}]}";
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().cacheControlByBlock()).isNotNull();
+        assertThat(req.anthropic().cacheControlByBlock().path("0-0").path("type").asText()).isEqualTo("ephemeral");
+    }
+
+    @Test
+    void shouldParseAssistantToolUseBlockCacheControl() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"},{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"get_weather\",\"input\":{\"city\":\"sf\"},\"cache_control\":{\"type\":\"ephemeral\"}}]}]}";
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
+        assertThat(req.anthropic().cacheControlByBlock()).isNotNull();
+        // assistant 消息是 body.messages()[1],text 是 block 0,tool_use 是 block 1
+        assertThat(req.anthropic().cacheControlByBlock().path("1-1").path("type").asText()).isEqualTo("ephemeral");
+    }
+
+    @Test
+    void shouldParseToolResultIsError() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"get_weather\",\"input\":{}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_1\",\"content\":\"sunny\",\"is_error\":false,\"cache_control\":{\"type\":\"ephemeral\"}}]}]}";
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().toolResultIsError()).containsEntry("call_1", false);
+        // tool_result 的 cache_control 用 toolUseId 作 key
+        assertThat(req.anthropic().cacheControlByBlock().path("call_1").path("type").asText()).isEqualTo("ephemeral");
+    }
+
+    @Test
+    void shouldParseToolResultContentArrayToRawBlocks() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"get_weather\",\"input\":{}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_1\",\"content\":[{\"type\":\"text\",\"text\":\"result text\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]}]}]}";
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().rawToolResultBlocks()).containsKey("call_1");
+        assertThat(req.anthropic().rawToolResultBlocks().get("call_1").isArray()).isTrue();
+        assertThat(req.anthropic().rawToolResultBlocks().get("call_1").size()).isEqualTo(2);
+    }
+
+    @Test
+    void shouldNotFillRawToolResultBlocksWhenContentIsString() {
+        String body = "{\"model\":\"claude-3-5-sonnet\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"get_weather\",\"input\":{}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_1\",\"content\":\"sunny\"}]}]}";
+        UnifiedChatRequest req = adapter.toUnifiedRequest(body.getBytes(StandardCharsets.UTF_8), Map.of());
+        // string content 不填 rawToolResultBlocks(走 IR.content)
+        if (req.anthropic().rawToolResultBlocks() != null) {
+            assertThat(req.anthropic().rawToolResultBlocks()).doesNotContainKey("call_1");
+        }
+    }
 }

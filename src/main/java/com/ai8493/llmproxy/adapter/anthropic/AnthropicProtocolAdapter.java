@@ -73,8 +73,8 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
             // 3. 构造 IR messages
             List<UnifiedMessage> messages = new ArrayList<>();
 
-            // AnthropicExtensions 在 system 解析之前声明,以便 system 解析和 beta header 解析都能写入
-            AnthropicExtensions anthropicExt = null;
+            // AnthropicExtensions 累积所有 anthropic 专属字段,最后统一 build
+            AnthropicExtensions.Builder extBuilder = AnthropicExtensions.builder();
 
             // 3.1 system 字段(union: string 或 array)
             JsonNode sysNode = root.path("system");
@@ -109,16 +109,23 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
                 messages.add(msgBuilder.build());
             }
 
-            // 把 rawSystemArray 写入 anthropicExt(beta header 解析在后,负责合并)
             if (rawSystemArray != null) {
-                anthropicExt = AnthropicExtensions.builder()
-                    .rawSystemArray(rawSystemArray)
-                    .build();
+                extBuilder.rawSystemArray(rawSystemArray);
             }
 
-            // 3.2 messages
+            // 3.2 messages(parseMessage 把 block 级字段累积到 collector)
+            // mainMsgIdx 是"主消息索引"(非 TOOL 消息的顺序索引),与出站 convert 的 currentMessageIndex 一致
+            // 纯 tool_result 消息(无 text/thinking/tool_use)不生成主消息,不递增 mainMsgIdx
+            // cache_control 的 key 用 mainMsgIdx,确保出站能查到
+            BlockLevelCollector collector = new BlockLevelCollector();
+            int mainMsgIdx = 0;
             for (MessageParam msgParam : body.messages()) {
-                messages.addAll(parseMessage(msgParam));
+                List<UnifiedMessage> parsed = parseMessage(msgParam, mainMsgIdx, collector);
+                // 主消息存在(列表首元素非 TOOL)时递增 mainMsgIdx
+                if (!parsed.isEmpty() && parsed.get(0).role() != UnifiedMessage.Role.TOOL) {
+                    mainMsgIdx++;
+                }
+                messages.addAll(parsed);
             }
 
             // 4. tools
@@ -173,7 +180,7 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
                 .serviceTier(serviceTier)
                 .build();
 
-            // 7. Anthropic Extensions(beta header)—— 合并到已有 anthropicExt(若 system 解析已填 rawSystemArray)
+            // 7. Anthropic Extensions 累积:beta header + metadata + output_config + context_management
             if (headers != null) {
                 String betaHeader = headers.get("anthropic-beta");
                 if (betaHeader != null && !betaHeader.isEmpty()) {
@@ -181,18 +188,47 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
                         .map(String::trim)
                         .filter(s -> !s.isEmpty())
                         .toList();
-                    if (anthropicExt == null) {
-                        anthropicExt = AnthropicExtensions.builder()
-                            .betaHeaders(betaHeaders)
-                            .build();
-                    } else {
-                        anthropicExt = AnthropicExtensions.builder()
-                            .betaHeaders(betaHeaders)
-                            .rawSystemArray(anthropicExt.rawSystemArray())
-                            .build();
-                    }
+                    extBuilder.betaHeaders(betaHeaders);
                 }
             }
+
+            // metadata.user_id
+            String metadataUserId = body.metadata()
+                .flatMap(m -> m.userId())
+                .orElse(null);
+            if (metadataUserId != null) {
+                extBuilder.metadataUserId(metadataUserId);
+            }
+
+            // output_config(SDK 有专属字段,转 JsonNode 透传)
+            JsonNode outputConfig = body.outputConfig()
+                .map(oc -> toJsonNode(oc))
+                .orElse(null);
+            if (outputConfig != null && !outputConfig.isNull()) {
+                extBuilder.outputConfig(outputConfig);
+            }
+
+            // context_management(SDK 无专属字段,从 raw JSON 取)
+            JsonNode contextManagement = root.path("context_management");
+            if (contextManagement.isMissingNode() || contextManagement.isNull()) {
+                contextManagement = null;
+            }
+            if (contextManagement != null) {
+                extBuilder.contextManagement(contextManagement);
+            }
+
+            // 把 collector 的 block 级字段 set 到 extBuilder
+            if (collector.cacheControlByBlock != null) {
+                extBuilder.cacheControlByBlock(collector.cacheControlByBlock);
+            }
+            if (collector.toolResultIsError != null) {
+                extBuilder.toolResultIsError(collector.toolResultIsError);
+            }
+            if (collector.rawToolResultBlocks != null) {
+                extBuilder.rawToolResultBlocks(collector.rawToolResultBlocks);
+            }
+
+            AnthropicExtensions anthropicExt = extBuilder.build();
 
             return UnifiedChatRequest.builder()
                 .model(body.model().asString())
@@ -208,26 +244,21 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
         }
     }
 
-    /** 提取 system 字段文本(string 形态直接取,array 形态从 raw JSON 拼接 text 块) */
-    private String extractSystemText(MessageCreateParams.System sys, JsonNode root) {
-        if (sys.isString()) return sys.asString();
-        // array 形态:[{type: "text", text: "..."}]
-        JsonNode sysNode = root.path("system");
-        if (sysNode.isArray()) {
-            StringBuilder sb = new StringBuilder();
-            for (JsonNode block : sysNode) {
-                if ("text".equals(block.path("type").asText())) {
-                    if (sb.length() > 0) sb.append("\n");
-                    sb.append(block.path("text").asText());
-                }
-            }
-            return sb.toString();
-        }
-        return sys.toString();
+    /** 收集 parseMessage 遍历的 block 级字段,最后 set 到 AnthropicExtensions.Builder */
+    private static class BlockLevelCollector {
+        com.fasterxml.jackson.databind.node.ObjectNode cacheControlByBlock = null;
+        java.util.Map<String, Boolean> toolResultIsError = null;
+        java.util.Map<String, com.fasterxml.jackson.databind.JsonNode> rawToolResultBlocks = null;
     }
 
-    /** 解析单个 MessageParam → List<UnifiedMessage>(tool_result 拆为独立 TOOL 消息,排在主消息之后) */
-    private List<UnifiedMessage> parseMessage(MessageParam msgParam) {
+    /** 解析单个 MessageParam -> List<UnifiedMessage>(tool_result 拆为独立 TOOL 消息,排在主消息之后)
+     *  block 级字段(cache_control/is_error/rawToolResultBlocks)按 key 累积到 extBuilder:
+     *  - text/tool_use 的 cache_control: key = "mainMsgIdx-blockIdx"
+     *  - tool_result 的 cache_control/is_error/rawBlocks: key = toolUseId
+     *  mainMsgIdx 是主消息顺序索引(与出站 convert 的 currentMessageIndex 一致),
+     *  纯 tool_result 消息不生成主消息,不消耗 mainMsgIdx(由调用方判断是否递增) */
+    private List<UnifiedMessage> parseMessage(MessageParam msgParam, int mainMsgIdx,
+                                              BlockLevelCollector collector) {
         String role = msgParam.role().asString();
         List<UnifiedMessage> result = new ArrayList<>();
 
@@ -243,20 +274,37 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
 
         // array 形态:遍历 content blocks
         StringBuilder textBuf = new StringBuilder();
+        // 收集 text blocks(保留 block 边界,用于 cache_control)
+        List<UnifiedPart.TextPart> textParts = new ArrayList<>();
+        boolean anyTextHasCacheControl = false;
         String reasoningContent = null;
         String thinkingSignature = null;
         List<UnifiedToolCall> toolCalls = new ArrayList<>();
         List<UnifiedMessage> toolResults = new ArrayList<>();
         List<UnifiedPart> parts = new ArrayList<>();
 
+        int blockIndex = 0;
         for (ContentBlockParam block : msgParam.content().asBlockParams()) {
+            String positionKey = mainMsgIdx + "-" + blockIndex;
+
             if (block.isText()) {
-                textBuf.append(block.asText().text());
+                // text block 的 cache_control
+                JsonNode ccNode = extractBlockCacheControl(block);
+                if (ccNode != null) {
+                    putCacheControl(collector, positionKey, ccNode);
+                    anyTextHasCacheControl = true;
+                }
+                textParts.add(new UnifiedPart.TextPart(block.asText().text()));
             } else if (block.isThinking()) {
                 // 第三方后端可能不返回 thinking/signature 字段,用 _xxx().asKnown() 安全访问避免 SDK 抛 AnthropicInvalidDataException
                 reasoningContent = block.asThinking()._thinking().asKnown().orElse(null);
                 thinkingSignature = block.asThinking()._signature().asKnown().orElse(null);
             } else if (block.isToolUse()) {
+                // tool_use block 的 cache_control
+                JsonNode ccNode = extractBlockCacheControl(block);
+                if (ccNode != null) {
+                    putCacheControl(collector, positionKey, ccNode);
+                }
                 var tu = block.asToolUse();
                 toolCalls.add(UnifiedToolCall.builder()
                     .id(tu.id())
@@ -275,6 +323,31 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
                     .toolCallId(tr.toolUseId())
                     .content(trContent)
                     .build());
+
+                // tool_result 的 block 级字段用 toolUseId 作 key
+                String toolUseId = tr.toolUseId();
+                if (toolUseId != null && !toolUseId.isEmpty()) {
+                    // is_error
+                    tr.isError().ifPresent(ie -> {
+                        if (collector.toolResultIsError == null) {
+                            collector.toolResultIsError = new java.util.HashMap<>();
+                        }
+                        collector.toolResultIsError.put(toolUseId, ie);
+                    });
+                    // cache_control
+                    JsonNode ccNode = extractBlockCacheControl(block);
+                    if (ccNode != null) {
+                        putCacheControl(collector, toolUseId, ccNode);
+                    }
+                    // rawToolResultBlocks:content 是 array 时存(string 走 IR.content)
+                    if (tr.content().isPresent() && tr.content().get().isBlocks()) {
+                        JsonNode rawBlocks = toJsonNode(tr.content().get().asBlocks());
+                        if (collector.rawToolResultBlocks == null) {
+                            collector.rawToolResultBlocks = new java.util.HashMap<>();
+                        }
+                        collector.rawToolResultBlocks.put(toolUseId, rawBlocks);
+                    }
+                }
             } else if (block.isImage()) {
                 // image block → ImagePart,转换为统一 data-URL 格式(避免 SDK 污染 + 跨后端兼容)
                 parts.add(new UnifiedPart.ImagePart(convertImageToDataUrl(block.asImage())));
@@ -287,12 +360,26 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
                 // document block → DocumentPart,手动提取核心字段(避免 SDK 内部字段污染)
                 parts.add(new UnifiedPart.DocumentPart(convertDocumentToJson(block.asDocument())));
             }
+            blockIndex++;
         }
 
-        // text+image 时 text 需进 parts(避免下游 convertUserMessage 走 parts 分支丢 text)
-        // text 放在 parts 开头,保持消息内顺序(text 通常在前)
-        if (!parts.isEmpty() && textBuf.length() > 0) {
-            parts.add(0, new UnifiedPart.TextPart(textBuf.toString()));
+        // 处理 text:
+        // - 有 cache_control: textParts 放到 parts 开头(保留 block 边界,convert 走 parts 路径按 blockIndex 应用 cache_control)
+        // - 有其他 parts(image 等): textParts 拼接到 textBuf,再放到 parts 开头(原行为)
+        // - 否则: textParts 拼接到 textBuf(原行为,content 是 string)
+        if (!textParts.isEmpty()) {
+            if (anyTextHasCacheControl) {
+                parts.addAll(0, textParts);
+            } else if (!parts.isEmpty()) {
+                for (var tp : textParts) {
+                    textBuf.append(tp.text());
+                }
+                parts.add(0, new UnifiedPart.TextPart(textBuf.toString()));
+            } else {
+                for (var tp : textParts) {
+                    textBuf.append(tp.text());
+                }
+            }
         }
 
         // 主消息(text + thinking + tool_use 合并)
@@ -311,6 +398,40 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
         // 追加 tool_result 消息
         result.addAll(toolResults);
         return result;
+    }
+
+    /** 从 ContentBlockParam 提取 cache_control,返回 {type:ephemeral[, ttl:...]} JsonNode 或 null
+     *  SDK 的 ContentBlockParam 是 sealed interface,各子类有 cacheControl() 方法返回 Optional<CacheControlEphemeral> */
+    private JsonNode extractBlockCacheControl(ContentBlockParam block) {
+        java.util.Optional<com.anthropic.models.messages.CacheControlEphemeral> ccOpt = java.util.Optional.empty();
+        if (block.isText()) {
+            ccOpt = block.asText().cacheControl();
+        } else if (block.isToolUse()) {
+            ccOpt = block.asToolUse().cacheControl();
+        } else if (block.isToolResult()) {
+            ccOpt = block.asToolResult().cacheControl();
+        } else if (block.isImage()) {
+            ccOpt = block.asImage().cacheControl();
+        } else if (block.isDocument()) {
+            ccOpt = block.asDocument().cacheControl();
+        }
+        // 注:ThinkingBlockParam 无 cacheControl 字段(规范不需要)
+        if (ccOpt.isEmpty()) return null;
+        var cc = ccOpt.get();
+        ObjectNode node = mapper.createObjectNode();
+        // _type() 返回 JsonValue(继承 JsonField,Java 里是 raw type),用 asString() 取字符串,默认 ephemeral
+        String typeStr = (String) cc._type().asString().orElse("ephemeral");
+        node.put("type", typeStr);
+        cc.ttl().ifPresent(ttl -> node.put("ttl", ttl.asString()));
+        return node;
+    }
+
+    /** 把 cache_control 按 key 写入 collector.cacheControlByBlock(JsonNode 累积) */
+    private void putCacheControl(BlockLevelCollector collector, String key, JsonNode ccNode) {
+        if (collector.cacheControlByBlock == null) {
+            collector.cacheControlByBlock = mapper.createObjectNode();
+        }
+        collector.cacheControlByBlock.set(key, ccNode);
     }
 
     /** 提取 tool_result 的 content 文本(string 直接取,array 拼接 text 块) */
@@ -404,6 +525,27 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
     @Override
     public byte[] fromUnifiedResponse(UnifiedChatResponse uResp) {
         try {
+            // 优先用原始响应 JSON(anthropic->anthropic 同协议字段零损失)
+            if (uResp.anthropic() != null && uResp.anthropic().responseRawMessage() != null) {
+                JsonNode raw = uResp.anthropic().responseRawMessage();
+                ObjectNode root = raw.deepCopy();
+                // SDK NON_NULL 序列化会跳过 null/0 字段,需补全协议规范要求必须存在的字段
+                if (!root.has("stop_sequence")) {
+                    root.putNull("stop_sequence");
+                }
+                JsonNode usageNode = root.get("usage");
+                if (usageNode != null && usageNode.isObject()) {
+                    ObjectNode usage = (ObjectNode) usageNode;
+                    if (!usage.has("cache_creation_input_tokens")) {
+                        usage.put("cache_creation_input_tokens", 0);
+                    }
+                    if (!usage.has("cache_read_input_tokens")) {
+                        usage.put("cache_read_input_tokens", 0);
+                    }
+                }
+                return mapper.writeValueAsBytes(root);
+            }
+
             var root = mapper.createObjectNode();
             root.put("id", uResp.id());
             root.put("type", "message");
@@ -451,7 +593,14 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
 
                 // stop_reason / stop_message(规范要求同发)
                 root.put("stop_reason", mapStopReason(choice.finishReason()));
-                root.putNull("stop_sequence");
+                // stop_sequence: 优先用 extensions.matchedStopSequence,否则 null
+                String stopSeq = uResp.anthropic() != null
+                    ? uResp.anthropic().matchedStopSequence() : null;
+                if (stopSeq != null) {
+                    root.put("stop_sequence", stopSeq);
+                } else {
+                    root.putNull("stop_sequence");
+                }
             }
 
             root.set("content", contentArr);
@@ -462,14 +611,9 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
                 usage.put("input_tokens", uResp.usage().promptTokens());
                 usage.put("output_tokens", uResp.usage().completionTokens());
                 // cache 三桶(计费恒等式: input_tokens + cache_read_input_tokens + cache_creation_input_tokens == 原 prompt_tokens)
-                if (uResp.usage().cachedTokens() > 0) {
-                    usage.put("cache_read_input_tokens", uResp.usage().cachedTokens());
-                }
-                if (uResp.usage().cacheCreationTokens() > 0) {
-                    usage.put("cache_creation_input_tokens", uResp.usage().cacheCreationTokens());
-                }
-                // reasoning_tokens(Anthropic 协议要求,即使为 0 也输出)
-                usage.put("reasoning_tokens", uResp.usage().reasoningTokens());
+                // Anthropic 协议规范要求 cache 字段即使为 0 也输出
+                usage.put("cache_read_input_tokens", uResp.usage().cachedTokens());
+                usage.put("cache_creation_input_tokens", uResp.usage().cacheCreationTokens());
                 root.set("usage", usage);
             }
 
@@ -604,14 +748,9 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
             usage.put("input_tokens", state.getInputTokens());
             usage.put("output_tokens", state.getOutputTokens());
             // cache 三桶(计费恒等式: input_tokens + cache_read_input_tokens + cache_creation_input_tokens == 原 prompt_tokens)
-            if (state.getCachedTokens() > 0) {
-                usage.put("cache_read_input_tokens", state.getCachedTokens());
-            }
-            if (state.getCacheCreationTokens() > 0) {
-                usage.put("cache_creation_input_tokens", state.getCacheCreationTokens());
-            }
-            // reasoning_tokens(协议要求,即使为 0 也输出)
-            usage.put("reasoning_tokens", state.getReasoningTokens());
+            // Anthropic 协议规范要求 cache 字段即使为 0 也输出
+            usage.put("cache_read_input_tokens", state.getCachedTokens());
+            usage.put("cache_creation_input_tokens", state.getCacheCreationTokens());
             message.set("usage", usage);
             start.set("message", message);
             events.add(writeJson(start));
@@ -642,6 +781,7 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
 
         if (delta != null) {
             reasoningContent = delta.reasoningContent();
+            thinkingSignature = delta.thinkingSignature();
             textContent = delta.content();
             toolCalls = delta.toolCalls();
         } else if (message != null) {
@@ -651,9 +791,14 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
             toolCalls = message.toolCalls();
         }
 
-        // 2. thinking block
+        // 2. thinking block(content_block_start + thinking_delta,signature 不放这里)
         if (reasoningContent != null && !reasoningContent.isEmpty()) {
-            events.addAll(emitContentBlock(state, "thinking", reasoningContent, thinkingSignature));
+            events.addAll(emitContentBlock(state, "thinking", reasoningContent, null));
+        }
+
+        // 2.5 thinking signature 单独发 signature_delta 事件(Anthropic 流式规范)
+        if (thinkingSignature != null && !thinkingSignature.isEmpty()) {
+            events.add(emitSignatureDelta(state, thinkingSignature));
         }
 
         // 3. text block
@@ -724,6 +869,8 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
             msgDelta.set("delta", d);
             var u = mapper.createObjectNode();
             u.put("output_tokens", state.getPendingOutputTokens() != null ? state.getPendingOutputTokens() : 0);
+            // Anthropic 规范要求 message_delta.usage 也包含 input_tokens(最终值)
+            u.put("input_tokens", state.getInputTokens());
             msgDelta.set("usage", u);
             events.add(writeJson(msgDelta));
 
@@ -759,15 +906,12 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
             state.setCurrentBlockIndex(idx);
             state.setCurrentBlockType(type);
 
-            // content_block_start
+            // content_block_start(signature 不放这里,通过 signature_delta 事件单独发送)
             var start = mapper.createObjectNode();
             start.put("type", "content_block_start");
             start.put("index", idx);
             var block = mapper.createObjectNode();
             block.put("type", type);
-            if ("thinking".equals(type) && signature != null) {
-                block.put("signature", signature);
-            }
             start.set("content_block", block);
             events.add(writeJson(start));
         }
@@ -789,6 +933,19 @@ public class AnthropicProtocolAdapter implements ProtocolAdapter {
         events.add(writeJson(deltaEvt));
 
         return events;
+    }
+
+    /** 发送 signature_delta 事件(thinking block 的 signature 单独发送,Anthropic 流式规范) */
+    private String emitSignatureDelta(StreamState state, String signature) {
+        Integer idx = state.getCurrentBlockIndex();
+        var deltaEvt = mapper.createObjectNode();
+        deltaEvt.put("type", "content_block_delta");
+        deltaEvt.put("index", idx != null ? idx : 0);
+        var delta = mapper.createObjectNode();
+        delta.put("type", "signature_delta");
+        delta.put("signature", signature);
+        deltaEvt.set("delta", delta);
+        return writeJson(deltaEvt);
     }
 
     private java.util.List<String> emitToolUseBlock(StreamState state, UnifiedToolCall tc) {

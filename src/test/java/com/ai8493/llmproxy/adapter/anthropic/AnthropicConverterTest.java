@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -309,13 +310,12 @@ class AnthropicConverterTest {
 
     @Test
     void response_ToolUseBlock转toolCalls() throws Exception {
-        var argsStr = "{\"location\": \"NYC\"}";
         var sdkMsg = fullMessage("msg_3", List.of(
             ContentBlock.ofText(textBlock("I'll check the weather.")),
             ContentBlock.ofToolUse(ToolUseBlock.builder()
                 .id("tu_1")
                 .name("get_weather")
-                .input(JsonValue.from(argsStr))
+                .input(JsonValue.from(Map.of("location", "NYC")))
                 .caller(DirectCaller.builder().build())
                 .build())
         ), StopReason.TOOL_USE, usage(10, 20));
@@ -1115,8 +1115,10 @@ class AnthropicConverterTest {
         // 转换不应抛异常
         var params = requestConverter.convert(modifiedIr);
         assertThat(params).isNotNull();
-        // 消息数：原始6条 + 新增4条 = 10，TOOL合并且去重后应该是 8
-        assertThat(params.messages().size()).isEqualTo(8);
+        // 消息数：原始5条(1 SYSTEM + 4 USER) + 新增4条 = 9
+        // Bug 1 修复: [TOOL, USER] 合并成 1 条 user(避免连续两条 user 违反 anthropic 协议)
+        // 新增的 TOOL(toolMsg2) + 后续 USER 合并成 1 条,所以输出 7 条
+        assertThat(params.messages().size()).isEqualTo(7);
     }
 
     @Test
@@ -1310,5 +1312,104 @@ class AnthropicConverterTest {
                 } catch (Exception ignored) {}
             }
         }
+    }
+
+    // ===== 端到端字段透传测试（Task 9）=====
+
+    @Test
+    void end2end_141d1ff6_顶层字段透传() throws Exception {
+        // 入站 JSON(模拟 141d1ff6 场景): system array + metadata + thinking + context_management + output_config
+        String inputJson = """
+            {
+              "model": "claude-3-5-sonnet",
+              "max_tokens": 4096,
+              "messages": [{"role": "user", "content": "hi"}],
+              "system": [{"type": "text", "text": "main instruction"}, {"type": "text", "text": "cached context", "cache_control": {"type": "ephemeral"}}],
+              "metadata": {"user_id": "user-141d1ff6"},
+              "thinking": {"type": "adaptive"},
+              "context_management": {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]},
+              "output_config": {"effort": "max", "format": {"type": "json_schema", "schema": {"type": "object", "properties": {}}}},
+              "stream": false
+            }
+            """;
+        var adapter = new AnthropicProtocolAdapter();
+        UnifiedChatRequest req = adapter.toUnifiedRequest(inputJson.getBytes(java.nio.charset.StandardCharsets.UTF_8), java.util.Map.of());
+
+        // 验证 IR 保留了所有字段
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().rawSystemArray()).isNotNull();
+        assertThat(req.anthropic().metadataUserId()).isEqualTo("user-141d1ff6");
+        assertThat(req.anthropic().outputConfig()).isNotNull();
+        assertThat(req.anthropic().outputConfig().path("effort").asText()).isEqualTo("max");
+        assertThat(req.anthropic().contextManagement()).isNotNull();
+        assertThat(req.anthropic().contextManagement().path("edits").isArray()).isTrue();
+
+        // 出站转换
+        var converter = new AnthropicRequestConverter();
+        MessageCreateParams params = converter.convert(req);
+
+        // 验证 SDK params 重建了所有字段
+        // system 是 array
+        assertThat(params.system()).isPresent();
+        assertThat(params.system().get().isTextBlockParams()).isTrue();
+        var sysBlocks = params.system().get().asTextBlockParams();
+        assertThat(sysBlocks).hasSize(2);
+        assertThat(sysBlocks.get(1).cacheControl()).isPresent();
+
+        // metadata
+        assertThat(params.metadata()).isPresent();
+        assertThat(params.metadata().get().userId()).hasValue("user-141d1ff6");
+
+        // output_config
+        assertThat(params.outputConfig()).isPresent();
+        assertThat(params.outputConfig().get().effort().get().asString()).isEqualTo("max");
+
+        // context_management(走 additionalBodyProperties,SDK 顶层是 _additionalBodyProperties 不是 _additionalProperties)
+        assertThat(params._additionalBodyProperties().containsKey("context_management")).isTrue();
+
+        // thinking
+        assertThat(params.thinking()).isPresent();
+        assertThat(params.thinking().get().isAdaptive()).isTrue();
+    }
+
+    @Test
+    void end2end_ae36763e_tool_result字段透传() throws Exception {
+        // 入站 JSON(模拟 ae36763e 场景): tool_result 含 is_error + cache_control
+        String inputJson = """
+            {
+              "model": "claude-3-5-sonnet",
+              "max_tokens": 4096,
+              "messages": [
+                {"role": "user", "content": "run command"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "call_79f6d37fa82d42baaea97025", "name": "bash", "input": {"command": "ls"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_79f6d37fa82d42baaea97025", "content": ".PSVersion : ...", "is_error": false, "cache_control": {"type": "ephemeral"}}]}
+              ],
+              "stream": false
+            }
+            """;
+        var adapter = new AnthropicProtocolAdapter();
+        UnifiedChatRequest req = adapter.toUnifiedRequest(inputJson.getBytes(java.nio.charset.StandardCharsets.UTF_8), java.util.Map.of());
+
+        // 验证 IR 提取了 tool_result 的 is_error + cache_control
+        assertThat(req.anthropic()).isNotNull();
+        assertThat(req.anthropic().toolResultIsError())
+            .containsEntry("call_79f6d37fa82d42baaea97025", false);
+        assertThat(req.anthropic().cacheControlByBlock())
+            .isNotNull();
+        assertThat(req.anthropic().cacheControlByBlock().path("call_79f6d37fa82d42baaea97025")
+            .path("type").asText()).isEqualTo("ephemeral");
+
+        // 出站转换
+        var converter = new AnthropicRequestConverter();
+        MessageCreateParams params = converter.convert(req);
+
+        // 验证 SDK params 重建了 tool_result 的 is_error + cache_control
+        // 最后一条消息是含 tool_result 的 user 消息
+        var lastMsg = params.messages().get(params.messages().size() - 1);
+        var toolResultBlock = lastMsg.content().asBlockParams().stream()
+            .filter(b -> b.isToolResult()).findFirst().orElseThrow();
+        assertThat(toolResultBlock.asToolResult().isError()).isPresent();
+        assertThat(toolResultBlock.asToolResult().isError().get()).isFalse();
+        assertThat(toolResultBlock.asToolResult().cacheControl()).isPresent();
     }
 }

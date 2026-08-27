@@ -39,6 +39,9 @@ public class ProxyOrchestrator {
             .tools(uReq.tools())
             .toolChoice(uReq.toolChoice())
             .stream(uReq.stream())
+            .anthropic(uReq.anthropic())
+            .openai(uReq.openai())
+            .gemini(uReq.gemini())
             .build());
     }
 
@@ -51,6 +54,9 @@ public class ProxyOrchestrator {
             .tools(uReq.tools())
             .toolChoice(uReq.toolChoice())
             .stream(uReq.stream())
+            .anthropic(uReq.anthropic())
+            .openai(uReq.openai())
+            .gemini(uReq.gemini())
             .build());
     }
 

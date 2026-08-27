@@ -56,12 +56,12 @@ class ClientConfigControllerTest {
             .exchange()
             .expectStatus().isOk()
             .expectBody()
-            .jsonPath("$.length()").isEqualTo(2)
+            .jsonPath("$.length()").isEqualTo(3)
             .jsonPath("$[*].id").value(ids -> {
                 @SuppressWarnings("unchecked")
                 java.util.List<Object> list = (java.util.List<Object>) ids;
                 org.assertj.core.api.Assertions.assertThat(list)
-                    .containsExactlyInAnyOrder("codex", "gemini-cli");
+                    .containsExactlyInAnyOrder("codex", "gemini-cli", "claude-code");
             });
     }
 

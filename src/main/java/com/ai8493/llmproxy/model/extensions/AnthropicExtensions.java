@@ -12,7 +12,12 @@ public record AnthropicExtensions(
     JsonNode cacheControlByBlock,
     Boolean disableParallelToolUse,
     String metadataUserId,
-    JsonNode citations
+    JsonNode citations,
+    JsonNode outputConfig,
+    JsonNode contextManagement,
+    Map<String, Boolean> toolResultIsError,
+    Map<String, JsonNode> rawToolResultBlocks,
+    JsonNode responseRawMessage
 ) {
     public static Builder builder() { return new Builder(); }
 
@@ -25,6 +30,11 @@ public record AnthropicExtensions(
         private Boolean disableParallelToolUse;
         private String metadataUserId;
         private JsonNode citations;
+        private JsonNode outputConfig;
+        private JsonNode contextManagement;
+        private Map<String, Boolean> toolResultIsError;
+        private Map<String, JsonNode> rawToolResultBlocks;
+        private JsonNode responseRawMessage;
 
         public Builder betaHeaders(List<String> v) { this.betaHeaders = v; return this; }
         public Builder cacheBreakdown(Map<String, Integer> v) { this.cacheBreakdown = v; return this; }
@@ -34,9 +44,15 @@ public record AnthropicExtensions(
         public Builder disableParallelToolUse(Boolean v) { this.disableParallelToolUse = v; return this; }
         public Builder metadataUserId(String v) { this.metadataUserId = v; return this; }
         public Builder citations(JsonNode v) { this.citations = v; return this; }
+        public Builder outputConfig(JsonNode v) { this.outputConfig = v; return this; }
+        public Builder contextManagement(JsonNode v) { this.contextManagement = v; return this; }
+        public Builder toolResultIsError(Map<String, Boolean> v) { this.toolResultIsError = v; return this; }
+        public Builder rawToolResultBlocks(Map<String, JsonNode> v) { this.rawToolResultBlocks = v; return this; }
+        public Builder responseRawMessage(JsonNode v) { this.responseRawMessage = v; return this; }
 
         public AnthropicExtensions build() {
-            return new AnthropicExtensions(betaHeaders, cacheBreakdown, matchedStopSequence, rawSystemArray, cacheControlByBlock, disableParallelToolUse, metadataUserId, citations);
+            return new AnthropicExtensions(betaHeaders, cacheBreakdown, matchedStopSequence, rawSystemArray, cacheControlByBlock, disableParallelToolUse, metadataUserId, citations,
+                outputConfig, contextManagement, toolResultIsError, rawToolResultBlocks, responseRawMessage);
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.ai8493.llmproxy.adapter.anthropic;
 
 import com.ai8493.llmproxy.model.*;
+import com.ai8493.llmproxy.model.extensions.AnthropicExtensions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -29,7 +30,8 @@ class AnthropicProtocolAdapterResponseTest {
 
         assertThat(usage.path("input_tokens").asInt()).isEqualTo(70);
         assertThat(usage.path("cache_read_input_tokens").asInt()).isEqualTo(30);
-        assertThat(usage.has("cache_creation_input_tokens")).isFalse();
+        // Anthropic 协议规范要求 cache_creation_input_tokens 即使为 0 也输出
+        assertThat(usage.path("cache_creation_input_tokens").asInt()).isEqualTo(0);
         assertThat(usage.path("output_tokens").asInt()).isEqualTo(50);
     }
 
@@ -49,12 +51,14 @@ class AnthropicProtocolAdapterResponseTest {
         JsonNode usage = root.path("usage");
 
         assertThat(usage.path("input_tokens").asInt()).isEqualTo(50);
-        assertThat(usage.has("cache_read_input_tokens")).isFalse();
+        // Anthropic 协议规范要求 cache_read_input_tokens 即使为 0 也输出
+        assertThat(usage.path("cache_read_input_tokens").asInt()).isEqualTo(0);
         assertThat(usage.path("cache_creation_input_tokens").asInt()).isEqualTo(50);
     }
 
     @Test
-    void shouldOutputReasoningTokensAlways() throws Exception {
+    void shouldNotOutputReasoningTokensField() throws Exception {
+        // reasoning_tokens 非 Anthropic 协议字段(实为 OpenAI 字段),不应出现在响应中
         UnifiedChatResponse ir = buildResponse(UnifiedUsage.builder()
             .promptTokens(100)
             .completionTokens(50)
@@ -68,25 +72,7 @@ class AnthropicProtocolAdapterResponseTest {
         JsonNode root = mapper.readTree(result);
         JsonNode usage = root.path("usage");
 
-        assertThat(usage.path("reasoning_tokens").asInt()).isEqualTo(20);
-    }
-
-    @Test
-    void shouldOutputReasoningTokensZero() throws Exception {
-        UnifiedChatResponse ir = buildResponse(UnifiedUsage.builder()
-            .promptTokens(100)
-            .completionTokens(50)
-            .totalTokens(150)
-            .cachedTokens(0)
-            .cacheCreationTokens(0)
-            .reasoningTokens(0)
-            .build());
-
-        byte[] result = adapter.fromUnifiedResponse(ir);
-        JsonNode root = mapper.readTree(result);
-        JsonNode usage = root.path("usage");
-
-        assertThat(usage.path("reasoning_tokens").asInt()).isEqualTo(0);
+        assertThat(usage.has("reasoning_tokens")).isFalse();
     }
 
     private UnifiedChatResponse buildResponse(UnifiedUsage usage) {
@@ -213,5 +199,173 @@ class AnthropicProtocolAdapterResponseTest {
         int cacheCreation = usage.path("cache_creation_input_tokens").asInt(0);
 
         assertThat(inputTokens + cacheRead + cacheCreation).isEqualTo(100);
+    }
+
+    @Test
+    void shouldOutputRawMessageWhenAvailable() throws Exception {
+        // 模拟后端原始响应 JSON(含 signature/citations/caller/server_tool_use/service_tier)
+        var rawMsg = mapper.readTree("""
+            {
+              "id": "msg-raw-1",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-4",
+              "stop_reason": "tool_use",
+              "stop_sequence": "",
+              "content": [
+                {"type": "thinking", "thinking": "思考", "signature": ""},
+                {"type": "text", "text": "你好", "citations": []},
+                {"type": "tool_use", "id": "call-1", "name": "get_weather", "input": {"city": "北京"}, "caller": ""}
+              ],
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 0,
+                "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0},
+                "service_tier": "standard"
+              }
+            }
+            """);
+        var anthropicExt = AnthropicExtensions.builder()
+            .responseRawMessage(rawMsg)
+            .build();
+        var uResp = UnifiedChatResponse.builder()
+            .id("msg-raw-1")
+            .model("claude-sonnet-4")
+            .object("chat.completion")
+            .created(1234567890L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .content("你好")
+                    .build())
+                .finishReason("tool_use")
+                .build()))
+            .usage(UnifiedUsage.builder()
+                .promptTokens(10)
+                .completionTokens(5)
+                .totalTokens(15)
+                .build())
+            .anthropic(anthropicExt)
+            .build();
+
+        var bytes = adapter.fromUnifiedResponse(uResp);
+        var result = mapper.readTree(bytes);
+
+        // 验证原始字段全保留
+        assertThat(result.path("id").asText()).isEqualTo("msg-raw-1");
+        assertThat(result.path("stop_sequence").asText()).isEqualTo("");
+        var content = result.path("content");
+        var thinking = content.get(0);
+        assertThat(thinking.path("signature").asText()).isEqualTo("");
+        assertThat(content.get(1).has("citations")).isTrue();
+        assertThat(content.get(2).has("caller")).isTrue();
+        var usage = result.path("usage");
+        assertThat(usage.has("server_tool_use")).isTrue();
+        assertThat(usage.has("service_tier")).isTrue();
+    }
+
+    @Test
+    void shouldPatchStopSequenceNullWhenRawMessageMissingIt() throws Exception {
+        // 模拟后端 SDK NON_NULL 序列化导致 stop_sequence 字段缺失(实测 58/58)
+        var rawMsg = mapper.readTree("""
+            {
+              "id": "msg-raw-2",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-4",
+              "stop_reason": "end_turn",
+              "content": [{"type": "text", "text": "hi"}],
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5
+              }
+            }
+            """);
+        var anthropicExt = AnthropicExtensions.builder()
+            .responseRawMessage(rawMsg)
+            .build();
+        var uResp = UnifiedChatResponse.builder()
+            .id("msg-raw-2")
+            .model("claude-sonnet-4")
+            .object("chat.completion")
+            .created(1234567890L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .content("hi")
+                    .build())
+                .finishReason("end_turn")
+                .build()))
+            .usage(UnifiedUsage.builder()
+                .promptTokens(10)
+                .completionTokens(5)
+                .totalTokens(15)
+                .build())
+            .anthropic(anthropicExt)
+            .build();
+
+        var bytes = adapter.fromUnifiedResponse(uResp);
+        var result = mapper.readTree(bytes);
+
+        // Anthropic 协议规范要求 stop_sequence 字段必须存在,无匹配时为 null
+        assertThat(result.has("stop_sequence")).isTrue();
+        assertThat(result.path("stop_sequence").isNull()).isTrue();
+    }
+
+    @Test
+    void shouldPatchCacheCreationZeroWhenRawMessageMissingIt() throws Exception {
+        // 模拟后端 SDK NON_NULL 序列化导致 cache_creation_input_tokens=0 被跳过(实测 58/58)
+        var rawMsg = mapper.readTree("""
+            {
+              "id": "msg-raw-3",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-4",
+              "stop_reason": "end_turn",
+              "content": [{"type": "text", "text": "hi"}],
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 80
+              }
+            }
+            """);
+        var anthropicExt = AnthropicExtensions.builder()
+            .responseRawMessage(rawMsg)
+            .build();
+        var uResp = UnifiedChatResponse.builder()
+            .id("msg-raw-3")
+            .model("claude-sonnet-4")
+            .object("chat.completion")
+            .created(1234567890L)
+            .choices(List.of(UnifiedChoice.builder()
+                .index(0)
+                .message(UnifiedMessage.builder()
+                    .role(UnifiedMessage.Role.ASSISTANT)
+                    .content("hi")
+                    .build())
+                .finishReason("end_turn")
+                .build()))
+            .usage(UnifiedUsage.builder()
+                .promptTokens(10)
+                .completionTokens(5)
+                .totalTokens(15)
+                .cachedTokens(80)
+                .cacheCreationTokens(0)
+                .build())
+            .anthropic(anthropicExt)
+            .build();
+
+        var bytes = adapter.fromUnifiedResponse(uResp);
+        var result = mapper.readTree(bytes);
+        var usage = result.path("usage");
+
+        // Anthropic 协议规范要求 cache_creation_input_tokens 即使为 0 也应输出
+        assertThat(usage.has("cache_creation_input_tokens")).isTrue();
+        assertThat(usage.path("cache_creation_input_tokens").asInt()).isEqualTo(0);
     }
 }

@@ -413,7 +413,9 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
             GenerateContentResponse resp = mapToGeminiResponse(uResp, ctx);
             String json = mapper.writeValueAsString(resp);
             rememberReasoning(uResp, ctx != null ? ctx.sessionKey() : null);
-            return mapper.writeValueAsBytes(stripNulls(mapper.readTree(json)));
+            JsonNode node = stripNulls(mapper.readTree(json));
+            node = injectThoughtSignature(node, uResp);
+            return mapper.writeValueAsBytes(node);
         } catch (Exception e) {
             throw new TransformException("序列化 Gemini 响应失败", e);
         }
@@ -429,10 +431,58 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
             GenerateContentResponse gChunk = mapToGeminiResponse(chunk, ctx);
             String json = mapper.writeValueAsString(gChunk);
             rememberReasoning(chunk, ctx != null ? ctx.sessionKey() : null);
-            return mapper.writeValueAsString(stripNulls(mapper.readTree(json)));
+            JsonNode node = stripNulls(mapper.readTree(json));
+            node = injectThoughtSignature(node, chunk);
+            return mapper.writeValueAsString(node);
         } catch (Exception e) {
             throw new TransformException("序列化 Gemini 流块失败", e);
         }
+    }
+
+    /**
+     * 把 IR.thinkingSignature 注入到 thought part 的 thoughtSignature 字段。
+     * Gemini SDK Part.thoughtSignature 是 byte[] 类型,但 Gemini CLI 期望 String 形式
+     * (请求方向已通过 raw JSON 提取 String 绕过 SDK,响应方向需对称处理)。
+     */
+    private JsonNode injectThoughtSignature(JsonNode node, UnifiedChatResponse uResp) {
+        String signature = extractThinkingSignature(uResp);
+        if (signature == null || signature.isEmpty()) {
+            return node;
+        }
+        JsonNode candidates = node.get("candidates");
+        if (candidates == null || !candidates.isArray()) {
+            return node;
+        }
+        for (JsonNode cand : candidates) {
+            JsonNode content = cand.get("content");
+            if (content == null) continue;
+            JsonNode parts = content.get("parts");
+            if (parts == null || !parts.isArray()) continue;
+            for (JsonNode part : parts) {
+                if (part.isObject() && part.has("thought") && part.get("thought").asBoolean(false)) {
+                    ((ObjectNode) part).put("thoughtSignature", signature);
+                    return node;
+                }
+            }
+        }
+        return node;
+    }
+
+    /** 从 IR choices 提取 thinkingSignature(delta 优先,回退 message) */
+    private String extractThinkingSignature(UnifiedChatResponse uResp) {
+        if (uResp.choices() == null || uResp.choices().isEmpty()) {
+            return null;
+        }
+        UnifiedChoice choice = uResp.choices().get(0);
+        UnifiedDelta delta = choice.delta();
+        if (delta != null && delta.thinkingSignature() != null) {
+            return delta.thinkingSignature();
+        }
+        UnifiedMessage message = choice.message();
+        if (message != null && message.thinkingSignature() != null) {
+            return message.thinkingSignature();
+        }
+        return null;
     }
 
     /**
@@ -800,6 +850,7 @@ public class GeminiProtocolAdapter implements ProtocolAdapter {
                 .promptTokenCount(uResp.usage().promptTokens())
                 .candidatesTokenCount(uResp.usage().completionTokens())
                 .totalTokenCount(uResp.usage().totalTokens())
+                .cachedContentTokenCount(uResp.usage().cachedTokens())
                 .build()
             : null;
 

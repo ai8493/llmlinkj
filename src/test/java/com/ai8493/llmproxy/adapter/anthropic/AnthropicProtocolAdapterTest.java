@@ -173,6 +173,86 @@ class AnthropicProtocolAdapterTest {
     }
 
     @Test
+    void toUnifiedRequest_纯tool_result消息不生成主消息时_cacheControlKey应用主消息索引() throws Exception {
+        // Bug 2 复现:入站 user [tool_result](纯 tool_result,不生成主消息)+ assistant [thinking, text(cache_control)]
+        // 修复前: cache_control key = "1-1"(bodyMsgIdx=1, blockIdx=1)
+        // 修复后: cache_control key = "0-1"(mainMsgIdx=0, 因为 user tool_result 不生成主消息)
+        // 出站 convert 用 currentMessageIndex 查(assistant 是第 0 个主消息,currentMessageIndex=0)
+        // 修复前 key 对不上,cache_control 丢失;修复后 key 一致,cache_control 保留
+        String json = """
+            {
+              "model": "claude-sonnet-4-5",
+              "max_tokens": 1024,
+              "messages": [
+                {
+                  "role": "user",
+                  "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "r1"}
+                  ]
+                },
+                {
+                  "role": "assistant",
+                  "content": [
+                    {"type": "thinking", "thinking": "思考", "signature": "sig"},
+                    {"type": "text", "text": "ok", "cache_control": {"type": "ephemeral"}}
+                  ]
+                }
+              ]
+            }
+            """;
+        UnifiedChatRequest req = adapter.toUnifiedRequest(json.getBytes(StandardCharsets.UTF_8), null);
+
+        // IR 消息结构:user tool_result 拆出 1 条 TOOL(不生成主消息),assistant 是第 0 个主消息
+        assertThat(req.messages().get(0).role()).isEqualTo(UnifiedMessage.Role.TOOL);
+        assertThat(req.messages().get(1).role()).isEqualTo(UnifiedMessage.Role.ASSISTANT);
+
+        // cacheControlByBlock 的 key 应是 "0-1"(mainMsgIdx=0, blockIdx=1),不是 "1-1"(bodyMsgIdx=1)
+        var ccByBlock = req.anthropic().cacheControlByBlock();
+        assertThat(ccByBlock).isNotNull();
+        assertThat(ccByBlock.has("0-1")).isTrue();
+        assertThat(ccByBlock.has("1-1")).isFalse();
+    }
+
+    @Test
+    void toUnifiedRequest_多textBlock且非首Block有cacheControl_应保留() throws Exception {
+        // Bug 2 复现:入站 user [text1, text2(cache_control)]
+        // 修复前: parseMessage 把 text1+text2 合并到 textBuf,convert 走 string 路径只查 block[0],cache_control 丢失
+        // 修复后: parseMessage 把 text block 放到 parts 里(每个 text block 一个 TextPart),
+        //         convert 走 parts 路径,每个 TextBlockParam 按 blockIndex 应用 cache_control
+        String json = """
+            {
+              "model": "claude-sonnet-4-5",
+              "max_tokens": 1024,
+              "messages": [
+                {
+                  "role": "user",
+                  "content": [
+                    {"type": "text", "text": "前缀"},
+                    {"type": "text", "text": "要缓存的内容", "cache_control": {"type": "ephemeral"}}
+                  ]
+                }
+              ]
+            }
+            """;
+        UnifiedChatRequest req = adapter.toUnifiedRequest(json.getBytes(StandardCharsets.UTF_8), null);
+
+        // 用 AnthropicRequestConverter 转回 SDK MessageCreateParams
+        var converter = new AnthropicRequestConverter();
+        var params = converter.convert(req);
+
+        // 验证出站 user message 的第 2 个 block 保留 cache_control
+        var msg = params.messages().get(0);
+        assertThat(msg.role()).isEqualTo(com.anthropic.models.messages.MessageParam.Role.USER);
+        var blocks = msg.content().asBlockParams();
+        assertThat(blocks).hasSize(2);
+        assertThat(blocks.get(0).asText().text()).isEqualTo("前缀");
+        assertThat(blocks.get(0).asText().cacheControl()).isEmpty();
+        assertThat(blocks.get(1).asText().text()).isEqualTo("要缓存的内容");
+        // 修复后: 第 2 个 block 应保留 cache_control
+        assertThat(blocks.get(1).asText().cacheControl()).isPresent();
+    }
+
+    @Test
     void toUnifiedRequest_tools和tool_choice应正确解析() throws Exception {
         String json = """
             {

@@ -3,6 +3,7 @@ package com.ai8493.llmproxy.adapter.anthropic;
 import com.anthropic.core.ObjectMappers;
 import com.anthropic.models.messages.*;
 import com.ai8493.llmproxy.model.UnifiedPart;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
@@ -290,5 +291,104 @@ class AnthropicResponseConverterTest {
         var uMsg = result.choices().get(0).message();
         assertThat(uMsg.reasoningContent()).isNull();
         assertThat(uMsg.thinkingSignature()).isEqualTo("sig-abc");
+    }
+
+    @Test
+    void shouldParseToolUseInputAsJsonNode() throws Exception {
+        // 复现: tu._input() 返回 JsonObject,其 toString() 是 Map.toString() 格式 {command=...}
+        // 旧实现 MAPPER.readTree(tu._input().toString()) 会抛 JsonParseException,导致 arguments 为 null
+        ObjectMapper mapper = ObjectMappers.jsonMapper();
+        String json = """
+            {
+              "id": "msg-1",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-4-20250514",
+              "content": [
+                {"type": "tool_use", "id": "call_1", "name": "Bash", "input": {"command": "ls -la", "description": "列出文件"}},
+                {"type": "text", "text": "执行命令"}
+              ],
+              "stop_reason": "tool_use",
+              "stop_sequence": null,
+              "usage": {"input_tokens": 10, "output_tokens": 5}
+            }
+            """;
+        Message msg = mapper.readValue(json, Message.class);
+
+        var converter = new AnthropicResponseConverter();
+        var result = converter.convert(msg);
+        var uMsg = result.choices().get(0).message();
+        assertThat(uMsg.toolCalls()).hasSize(1);
+        var tc = uMsg.toolCalls().get(0);
+        assertThat(tc.id()).isEqualTo("call_1");
+        assertThat(tc.function().name()).isEqualTo("Bash");
+        JsonNode args = tc.function().arguments();
+        assertThat(args).isNotNull();
+        assertThat(args.isObject()).isTrue();
+        assertThat(args.path("command").asText()).isEqualTo("ls -la");
+        assertThat(args.path("description").asText()).isEqualTo("列出文件");
+    }
+
+    @Test
+    void shouldExtractRawMessageToExtensions() throws Exception {
+        // 验证后端原始响应 JSON 被提取到 extensions.responseRawMessage,保留所有字段
+        ObjectMapper mapper = ObjectMappers.jsonMapper();
+        String json = """
+            {
+              "id": "msg-raw-1",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-4",
+              "stop_reason": "tool_use",
+              "stop_sequence": "",
+              "content": [
+                {"type": "thinking", "thinking": "思考", "signature": ""},
+                {"type": "text", "text": "你好", "citations": []},
+                {"type": "tool_use", "id": "call-1", "name": "get_weather", "input": {"city": "北京"}, "caller": ""}
+              ],
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 0,
+                "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0},
+                "service_tier": "standard"
+              }
+            }
+            """;
+        Message msg = mapper.readValue(json, Message.class);
+
+        var converter = new AnthropicResponseConverter();
+        var result = converter.convert(msg);
+        // 原始响应 JSON 应存到 extensions.responseRawMessage
+        assertThat(result.anthropic()).isNotNull();
+        assertThat(result.anthropic().responseRawMessage()).isNotNull();
+        var rawMsg = result.anthropic().responseRawMessage();
+        // 验证关键字段都在原始 JSON 中
+        assertThat(rawMsg.path("id").asText()).isEqualTo("msg-raw-1");
+        assertThat(rawMsg.path("stop_reason").asText()).isEqualTo("tool_use");
+        assertThat(rawMsg.path("stop_sequence").asText()).isEqualTo("");
+        // content blocks 字段
+        var content = rawMsg.path("content");
+        assertThat(content.isArray()).isTrue();
+        assertThat(content.size()).isEqualTo(3);
+        // thinking block 含 signature(即使是空串)
+        var thinkingBlock = content.get(0);
+        assertThat(thinkingBlock.path("type").asText()).isEqualTo("thinking");
+        assertThat(thinkingBlock.has("signature")).isTrue();
+        assertThat(thinkingBlock.path("signature").asText()).isEqualTo("");
+        // text block 含 citations
+        var textBlock = content.get(1);
+        assertThat(textBlock.path("type").asText()).isEqualTo("text");
+        assertThat(textBlock.has("citations")).isTrue();
+        // tool_use block 含 caller
+        var toolUseBlock = content.get(2);
+        assertThat(toolUseBlock.path("type").asText()).isEqualTo("tool_use");
+        assertThat(toolUseBlock.has("caller")).isTrue();
+        // usage 含 server_tool_use 和 service_tier
+        var usage = rawMsg.path("usage");
+        assertThat(usage.has("server_tool_use")).isTrue();
+        assertThat(usage.has("service_tier")).isTrue();
+        assertThat(usage.path("service_tier").asText()).isEqualTo("standard");
     }
 }
